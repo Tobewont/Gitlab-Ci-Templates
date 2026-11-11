@@ -1,0 +1,167 @@
+# 原子能力：MR 检测结论（.mr-verdict）
+# 汇总本次 pipeline 的 job 状态，按 allow_failure 泛化判定"是否有被拦截的必检项"：
+#   仅 allow_failure=false 且 failed/canceled 的 job 计入拦截（blocked）；
+#   allow_failure=true 的 job 失败视为豁免，仅在评论中提示、不拦截合并。
+# 计算 blocked 时排除本 job 自身与汇报型 job（避免结论 job 把自己或通知 job 计入拦截）。
+# 组装结论评论并复用 .git-comment-post 回帖；GIT_MR_VERDICT_AUTO_CLOSE=true 时对存在拦截项的 MR 执行关闭。
+#
+# 可选：GIT_MR_VERDICT_EXTRACT 对失败的关注 job 从其日志提取明细（如 prettier 失败文件列表），
+#   附到该 job 的评论行。提取算法与 .git-job-log 一致（去 ANSI + 提取/排除/清洗正则）。
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/git/comment/jobs.gitlab-ci.yml'
+  - local: '/git/mr-verdict/variables.gitlab-ci.yml'
+
+.mr-verdict:
+  extends: .base-job
+  variables:
+    GIT_STRATEGY: none
+    GIT_COMMENT_TARGET: "mr"
+  script:
+    # guard 失败则不回帖、不关闭（when: always 不受 needs 拦截，按状态文件自行判定）
+    - |
+      if [ -f .ci-config-guard-result ] && [ "$(cat .ci-config-guard-result 2>/dev/null)" = "blocked" ]; then
+        echo "[skip] CI 配置保护检查未通过（ci-config-guard failed），跳过结论回帖"; exit 0
+      fi
+      if [ "${GIT_MR_VERDICT_ENABLE:-true}" != "true" ]; then
+        echo "[skip] GIT_MR_VERDICT_ENABLE != true"; exit 0
+      fi
+      if [ -z "$CI_MERGE_REQUEST_IID" ]; then
+        echo "[skip] 非 MR 流水线"; exit 0
+      fi
+      if [ -z "$GIT_MR_VERDICT_TOKEN" ]; then
+        echo "[skip] GIT_MR_VERDICT_TOKEN 未配置"; exit 0
+      fi
+    - !reference [.pipeline-jobs-fetch, script]
+    # 拉本 pipeline 全部 job，一次 Python 同时产出评论内容与 blocked 标记
+    - |
+      command -v curl >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache curl >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq curl >/dev/null 2>&1)
+      command -v python3 >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache python3 >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq python3 >/dev/null 2>&1)
+      _pipeline_jobs_fetch "$GIT_MR_VERDICT_TOKEN"
+      printf '%s' "$JOBS_JSON" | \
+        PYTHONIOENCODING=utf-8 \
+        GIT_MR_VERDICT_CHECK_JOBS="${GIT_MR_VERDICT_CHECK_JOBS:-}" \
+        GIT_MR_VERDICT_DETAIL_URL="${GIT_MR_VERDICT_DETAIL_URL:-}" \
+        GIT_MR_VERDICT_BODY_FILE="${GIT_MR_VERDICT_BODY_FILE:-.git-comment-body}" \
+        GIT_MR_VERDICT_EXTRACT="${GIT_MR_VERDICT_EXTRACT:-}" \
+        GIT_MR_VERDICT_EXTRACT_MAX="${GIT_MR_VERDICT_EXTRACT_MAX:-50}" \
+        CI_JOB_NAME="${CI_JOB_NAME:-}" \
+        CI_API_V4_URL="${CI_API_V4_URL:-}" \
+        CI_PROJECT_ID="${CI_PROJECT_ID:-}" \
+        GIT_MR_VERDICT_TOKEN="${GIT_MR_VERDICT_TOKEN:-}" \
+        CI_MERGE_REQUEST_SOURCE_BRANCH_NAME="${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME:-}" \
+        python3 -c '
+      import sys, os, json, re
+      try:
+          from urllib.request import Request, urlopen
+      except Exception:
+          Request = urlopen = None
+      js = json.loads(sys.stdin.read() or "[]")
+      latest = {}
+      for j in js:
+          latest[j.get("name","")] = j  # 同名 job 以最后一条为准
+      self_name = os.environ.get("CI_JOB_NAME","")
+      EXCLUDE = {self_name, "notify", "mr-comment", "mr-verdict"}
+      blocked = [n for n, j in latest.items()
+                 if n not in EXCLUDE
+                 and not j.get("allow_failure")
+                 and j.get("status") in ("failed","canceled")]
+      detail_url = os.environ.get("GIT_MR_VERDICT_DETAIL_URL","").strip().replace(
+          "$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME",
+          os.environ.get("CI_MERGE_REQUEST_SOURCE_BRANCH_NAME",""))
+      watch = [x.strip() for x in os.environ.get("GIT_MR_VERDICT_CHECK_JOBS","").split(",") if x.strip()]
+
+      # GIT_MR_VERDICT_EXTRACT 格式："job|match|exclude|strip"，多组用 ; 分隔（match 必填，后两项可空）
+      extract_cfg = {}
+      for grp in os.environ.get("GIT_MR_VERDICT_EXTRACT","").split(";"):
+          grp = grp.strip()
+          if not grp: continue
+          parts = grp.split("|", 3)
+          jobn = parts[0].strip()
+          if not jobn or len(parts) < 2 or not parts[1].strip(): continue
+          extract_cfg[jobn] = {
+              "match": parts[1],
+              "exclude": parts[2] if len(parts) > 2 else "",
+              "strip": parts[3] if len(parts) > 3 else "",
+          }
+      try:
+          extract_max = int(os.environ.get("GIT_MR_VERDICT_EXTRACT_MAX","50"))
+      except ValueError:
+          extract_max = 50
+
+      def extract_from_job(job_id, cfg):
+          # 与 .git-job-log 同一套提取算法；正则非法时该 job 跳过提取并告警
+          if Request is None or not job_id: return ""
+          url = "%s/projects/%s/jobs/%s/trace" % (
+              os.environ.get("CI_API_V4_URL",""), os.environ.get("CI_PROJECT_ID",""), job_id)
+          req = Request(url, headers={"PRIVATE-TOKEN": os.environ.get("GIT_MR_VERDICT_TOKEN","")})
+          try:
+              raw = urlopen(req, timeout=30).read().decode("utf-8","ignore")
+          except Exception:
+              return ""
+          raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", raw)
+          try:
+              m_re = re.compile(cfg["match"])
+              ex_re = re.compile(cfg["exclude"]) if cfg.get("exclude") else None
+              st_re = re.compile(cfg["strip"]) if cfg.get("strip") else None
+          except re.error as e:
+              print("[warn] GIT_MR_VERDICT_EXTRACT 正则非法，跳过该 job 提取：%s" % e)
+              return ""
+          out, seen = [], set()
+          for ln in raw.split("\n"):
+              ln = ln.rstrip("\r")
+              if not m_re.search(ln): continue
+              if ex_re and ex_re.search(ln): continue
+              if st_re: ln = st_re.sub("", ln, count=1)
+              ln = ln.strip()
+              if not ln or ln in seen: continue
+              seen.add(ln); out.append(ln)
+              if len(out) >= extract_max: break
+          return "、".join(out)
+
+      lines = []
+      for name in watch:
+          j = latest.get(name)
+          if not j: continue
+          st = j.get("status",""); af = j.get("allow_failure")
+          if st == "success":
+              lines.append("%s检测✅" % name)
+          elif st in ("failed","canceled"):
+              tip = ("%s检测❌（allow_failure，不拦截合并）⚠️" % name) if af else ("%s检测❌" % name)
+              if name in extract_cfg:
+                  files = extract_from_job(j.get("id",""), extract_cfg[name])
+                  if files:
+                      tip += "\n%s扫描结果：%s" % (name, files)
+                  elif detail_url:
+                      tip += "\n扫描结果：%s" % detail_url
+              elif detail_url:
+                  tip += "\n扫描结果：%s" % detail_url
+              lines.append(tip)
+          else:
+              lines.append("%s：%s" % (name, st))
+      detail = ("\n" + "\n".join(lines)) if lines else ""
+      if blocked:
+          head = "存在未通过的必检项❌：%s，不允许合并⚠️" % "、".join(blocked)
+      else:
+          head = "必检项全部通过（或均为允许失败项）✅，允许合并✅"
+      with open(os.environ.get("GIT_MR_VERDICT_BODY_FILE",".git-comment-body"), "w", encoding="utf-8") as f:
+          f.write(head + detail)
+      with open(".mr-verdict-blocked", "w", encoding="utf-8") as f:
+          f.write("1" if blocked else "0")
+      print("blocked=%s" % (",".join(blocked) if blocked else "(none)"))
+      '
+    - !reference [.git-comment-post, script]
+    # 存在被拦截的必检项且开启自动关闭时，关闭 MR
+    - |
+      if [ "${GIT_MR_VERDICT_AUTO_CLOSE:-false}" = "true" ] && [ "$(cat .mr-verdict-blocked 2>/dev/null)" = "1" ]; then
+        URL="$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID"
+        RESP=$(curl -sS --max-time 30 -X PUT -H "PRIVATE-TOKEN: $GIT_MR_VERDICT_TOKEN" --data-urlencode "state_event=close" "$URL" 2>/dev/null || echo "")
+        if printf '%s' "$RESP" | grep -q '"state" *: *"closed"'; then
+          echo "已关闭 MR !$CI_MERGE_REQUEST_IID（存在未通过的必检项）"
+        else
+          echo "[error] MR 关闭失败: $(printf '%s' "$RESP" | head -c 200)"; exit 1
+        fi
+      else
+        echo "未触发自动关闭（AUTO_CLOSE=${GIT_MR_VERDICT_AUTO_CLOSE:-false}, blocked=$(cat .mr-verdict-blocked 2>/dev/null)）"
+      fi

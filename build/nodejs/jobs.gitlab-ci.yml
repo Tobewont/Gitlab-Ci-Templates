@@ -1,0 +1,148 @@
+# 原子能力：Node.js 前端 / Node 服务构建
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/build/nodejs/variables.gitlab-ci.yml'
+
+stages:
+  - build
+
+.node-build:
+  extends: .base-job
+  image: $BUILD_NODE_IMAGE
+  stage: build
+  variables:
+    STEP_NAME: "Node Build"
+    STEP_ENABLE: "$BUILD_NODE_ENABLE"
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（BUILD_NODE_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+
+      # 无 package.json 无法执行 Node 构建，跳过（如需完全关闭本 job 用 BUILD_NODE_ENABLE=false）
+      if [ ! -f package.json ]; then
+        echo "[skip] 未发现 package.json，跳过 $STEP_NAME"; exit 0
+      fi
+
+      # 写 .env 文件
+      if [ -n "$BUILD_NODE_ENV_FILE_CONTENT" ]; then
+        printf '%s\n' "$BUILD_NODE_ENV_FILE_CONTENT" > "$BUILD_NODE_ENV_FILE_PATH"
+        echo "已写入 $BUILD_NODE_ENV_FILE_PATH"
+      fi
+
+      # 设置 Node 内存
+      if [ -n "$BUILD_NODE_MAX_OLD_SPACE_SIZE" ]; then
+        export NODE_OPTIONS="--max_old_space_size=$BUILD_NODE_MAX_OLD_SPACE_SIZE"
+      fi
+
+      # 配置 registry
+      #   1. BUILD_NODE_REGISTRY 显式设置 → 用它
+      #   2. USE_CHINA_MIRROR=true (默认) → 用 npmmirror
+      #   3. USE_CHINA_MIRROR=false → 不改 registry (用容器/项目默认配置, 如 .npmrc)
+      if [ -n "$BUILD_NODE_REGISTRY" ]; then
+        echo "==> npm registry: $BUILD_NODE_REGISTRY (显式)"
+        case "$BUILD_NODE_PACKAGE_MANAGER" in
+          yarn)         yarn config set registry "$BUILD_NODE_REGISTRY" ;;
+          npm|cnpm|pnpm) npm config set registry "$BUILD_NODE_REGISTRY" ;;
+        esac
+      elif [ "${USE_CHINA_MIRROR:-true}" = "true" ]; then
+        BUILD_NODE_REGISTRY="https://registry.npmmirror.com"
+        echo "==> npm registry: $BUILD_NODE_REGISTRY (国内镜像)"
+        case "$BUILD_NODE_PACKAGE_MANAGER" in
+          yarn)         yarn config set registry "$BUILD_NODE_REGISTRY" ;;
+          npm|cnpm|pnpm) npm config set registry "$BUILD_NODE_REGISTRY" ;;
+        esac
+      else
+        echo "==> npm registry: 保持容器/项目默认配置 (USE_CHINA_MIRROR=false)"
+      fi
+
+      # 安装依赖（有 BUILD_NODE_INSTALL_CMD 用它；否则按包管理器默认）
+      if [ -n "$BUILD_NODE_INSTALL_CMD" ]; then
+        eval "$BUILD_NODE_INSTALL_CMD"
+      else
+        case "$BUILD_NODE_PACKAGE_MANAGER" in
+          npm)  npm ci || npm install ;;
+          yarn) yarn install --frozen-lockfile || yarn install ;;
+          cnpm) npm i -g cnpm --registry="$BUILD_NODE_REGISTRY"; cnpm install ;;
+          pnpm) npm i -g pnpm; pnpm install --frozen-lockfile || pnpm install ;;
+          *)    echo "未知包管理器 $BUILD_NODE_PACKAGE_MANAGER"; exit 1 ;;
+        esac
+      fi
+
+      # 执行构建
+      eval "$BUILD_NODE_BUILD_CMD"
+  artifacts:
+    when: always
+    paths:
+      - $BUILD_NODE_ARTIFACT_PATH
+    expire_in: "7 days"
+  cache:
+    key: "$CI_PROJECT_ID-node-$BUILD_NODE_PACKAGE_MANAGER"
+    paths:
+      - node_modules/
+      - .npm/
+      - .yarn/cache/
+      - .pnpm-store/
+
+# Windows PowerShell 版本
+.node-build-windows:
+  extends: .base-job
+  stage: build
+  tags:
+    - windows
+  variables:
+    STEP_NAME: "Node Build (Windows)"
+    STEP_ENABLE: "$BUILD_NODE_ENABLE"
+  script:
+    - |
+      if ($env:STEP_ENABLE -ne "true") { Write-Host "[skip] $env:STEP_NAME 未启用（BUILD_NODE_ENABLE=$env:STEP_ENABLE）"; exit 0 }
+
+      # 无 package.json 无法执行 Node 构建，跳过（如需完全关闭本 job 用 BUILD_NODE_ENABLE=false）
+      if (-not (Test-Path package.json)) {
+        Write-Host "[skip] 未发现 package.json，跳过 $env:STEP_NAME"; exit 0
+      }
+
+      if ($env:BUILD_NODE_ENV_FILE_CONTENT) {
+        Set-Content -Path $env:BUILD_NODE_ENV_FILE_PATH -Value $env:BUILD_NODE_ENV_FILE_CONTENT
+      }
+      if ($env:BUILD_NODE_MAX_OLD_SPACE_SIZE) {
+        $env:NODE_OPTIONS = "--max_old_space_size=$env:BUILD_NODE_MAX_OLD_SPACE_SIZE"
+      }
+      # 配置 registry
+      #   1. BUILD_NODE_REGISTRY 显式设置 → 用它
+      #   2. USE_CHINA_MIRROR=true (默认) → 用 npmmirror
+      #   3. USE_CHINA_MIRROR=false → 不改 registry (用容器/项目默认配置, 如 .npmrc)
+      if ($env:BUILD_NODE_REGISTRY) {
+        Write-Host "==> npm registry: $env:BUILD_NODE_REGISTRY (显式)"
+        switch ($env:BUILD_NODE_PACKAGE_MANAGER) {
+          "yarn"  { yarn config set registry $env:BUILD_NODE_REGISTRY }
+          default { npm config set registry $env:BUILD_NODE_REGISTRY }
+        }
+      } elseif ($env:USE_CHINA_MIRROR -eq $null -or $env:USE_CHINA_MIRROR -eq "true") {
+        $env:BUILD_NODE_REGISTRY = "https://registry.npmmirror.com"
+        Write-Host "==> npm registry: $env:BUILD_NODE_REGISTRY (国内镜像)"
+        switch ($env:BUILD_NODE_PACKAGE_MANAGER) {
+          "yarn"  { yarn config set registry $env:BUILD_NODE_REGISTRY }
+          default { npm config set registry $env:BUILD_NODE_REGISTRY }
+        }
+      } else {
+        Write-Host "==> npm registry: 保持容器/项目默认配置 (USE_CHINA_MIRROR=false)"
+      }
+      if ($env:BUILD_NODE_INSTALL_CMD) {
+        Invoke-Expression $env:BUILD_NODE_INSTALL_CMD
+      } else {
+        switch ($env:BUILD_NODE_PACKAGE_MANAGER) {
+          "npm"  { npm ci; if ($LASTEXITCODE -ne 0) { npm install } }
+          "yarn" { yarn install --frozen-lockfile; if ($LASTEXITCODE -ne 0) { yarn install } }
+          "cnpm" { npm i -g cnpm --registry=$env:BUILD_NODE_REGISTRY; cnpm install }
+          "pnpm" { npm i -g pnpm; pnpm install --frozen-lockfile; if ($LASTEXITCODE -ne 0) { pnpm install } }
+          default { Write-Error "未知包管理器 $env:BUILD_NODE_PACKAGE_MANAGER"; exit 1 }
+        }
+      }
+      Invoke-Expression $env:BUILD_NODE_BUILD_CMD
+  artifacts:
+    when: always
+    paths:
+      - $BUILD_NODE_ARTIFACT_PATH
+    expire_in: "7 days"

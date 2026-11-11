@@ -1,0 +1,42 @@
+# 原子能力：Trivy 镜像漏洞扫描
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/security/trivy/variables.gitlab-ci.yml'
+
+stages:
+  - security
+
+# Trivy 镜像漏洞扫描
+.trivy:
+  extends: .base-job
+  image: $SEC_TRIVY_IMAGE
+  stage: security
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "Trivy"
+    STEP_ENABLE: "$SEC_TRIVY_ENABLE"
+  script:
+    - !reference [.skip-if-disabled, script]
+    - |
+      if [ -z "$SEC_TRIVY_TARGET" ]; then
+        echo "[skip] SEC_TRIVY_TARGET 未配置（待扫描镜像全 URL）"
+        exit 0
+      fi
+      trivy image \
+        --timeout "$SEC_TRIVY_TIMEOUT" \
+        --severity "$SEC_TRIVY_SEVERITY" \
+        --exit-code "$SEC_TRIVY_EXIT_CODE" \
+        --format json --output trivy-report.json \
+        "$SEC_TRIVY_TARGET"
+      trivy image --timeout "$SEC_TRIVY_TIMEOUT" --severity "$SEC_TRIVY_SEVERITY" --format table "$SEC_TRIVY_TARGET" || true
+  artifacts:
+    when: always
+    paths:
+      - trivy-report.json
+    expire_in: "7 days"

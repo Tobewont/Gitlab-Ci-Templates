@@ -1,0 +1,23 @@
+variables:
+  # ── MSBuild（.NET / C++） ─────────────────────────────────────────
+  # [用户可配] MSBuild 开关
+  BUILD_MSBUILD_ENABLE: "true"
+  # [用户可配] 解决方案 / 项目路径（相对仓库根）
+  BUILD_MSBUILD_SOLUTION: ""
+  # [用户可配] 构建配置（Release / Debug）
+  BUILD_MSBUILD_CONFIGURATION: "Release"
+  # [用户可配] 平台（x64 / Win32 / Any CPU / ...）
+  BUILD_MSBUILD_PLATFORM: "x64"
+  # [用户可配] 额外 msbuild 参数
+  BUILD_MSBUILD_EXTRA_ARGS: ""
+  # [用户可配] Visual Studio Developer Command Prompt（VS2003 / VS2019 vsdevcmd.bat）
+  # 留空则要求 runner 环境变量已初始化好 msbuild
+  BUILD_MSBUILD_VSDEVCMD: ""
+
+  # ── Windows .bat 脚本 ────────────────────────────────────────────
+  # [用户可配] 是否启用 .bat 执行
+  BUILD_WIN_BAT_ENABLE: "true"
+  # [用户可配] 要执行的 .bat 脚本路径（相对仓库根，如 CI/win_test.bat）
+  BUILD_WIN_BAT_SCRIPT: ""
+  # [用户可配] 传给 .bat 的参数
+  BUILD_WIN_BAT_ARGS: ""

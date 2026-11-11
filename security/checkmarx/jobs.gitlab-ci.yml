@@ -1,0 +1,52 @@
+# 原子能力：Checkmarx CxSAST 扫描（走 CxSAST CLI runCxConsole.sh）
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/security/checkmarx/variables.gitlab-ci.yml'
+
+stages:
+  - security
+
+# Checkmarx CxSAST 扫描（走 CxSAST CLI runCxConsole.sh）
+.checkmarx:
+  extends: .base-job
+  image: $SEC_CHECKMARX_IMAGE
+  stage: security
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "Checkmarx"
+    STEP_ENABLE: "$SEC_CHECKMARX_ENABLE"
+  script:
+    - !reference [.skip-if-disabled, script]
+    - |
+      if [ -z "$SEC_CHECKMARX_SERVER_URL" ] || [ -z "$SEC_CHECKMARX_USERNAME" ] || [ -z "$SEC_CHECKMARX_PASSWORD" ]; then
+        echo "[skip] Checkmarx 未配置 SERVER_URL / USERNAME / PASSWORD"
+        exit 0
+      fi
+      if ! command -v runCxConsole.sh >/dev/null 2>&1; then
+        echo "[error] runCxConsole.sh 未找到：已配置 Checkmarx 但镜像内无 CLI，无法执行扫描。请在 SEC_CHECKMARX_IMAGE / CI_BASE_IMAGE 内预装 Checkmarx CLI"
+        exit 1
+      fi
+      THRESHOLD_ARGS=""
+      [ -n "$SEC_CHECKMARX_HIGH_THRESHOLD" ]   && THRESHOLD_ARGS="$THRESHOLD_ARGS -SASTHigh $SEC_CHECKMARX_HIGH_THRESHOLD"
+      [ -n "$SEC_CHECKMARX_MEDIUM_THRESHOLD" ] && THRESHOLD_ARGS="$THRESHOLD_ARGS -SASTMedium $SEC_CHECKMARX_MEDIUM_THRESHOLD"
+      [ -n "$SEC_CHECKMARX_LOW_THRESHOLD" ]    && THRESHOLD_ARGS="$THRESHOLD_ARGS -SASTLow $SEC_CHECKMARX_LOW_THRESHOLD"
+      runCxConsole.sh Scan \
+        -CxServer "$SEC_CHECKMARX_SERVER_URL" \
+        -CxUser "$SEC_CHECKMARX_USERNAME" \
+        -CxPassword "$SEC_CHECKMARX_PASSWORD" \
+        -ProjectName "${SEC_CHECKMARX_TEAM_PATH}/${SEC_CHECKMARX_PROJECT_NAME}" \
+        -preset "$SEC_CHECKMARX_PRESET" \
+        -LocationType folder -LocationPath . \
+        -ReportXML checkmarx-report.xml \
+        $THRESHOLD_ARGS
+  artifacts:
+    when: always
+    paths:
+      - checkmarx-report.xml
+    expire_in: "7 days"

@@ -1,0 +1,28 @@
+{
+  "_comment": "种子项目清单示例。复制为 scripts/seeds.json 后按实际填写。种子=examples/ 落地的专用冒烟工程，不是业务生产仓库。project 可用数字 ID 或 'group/subgroup/project' 路径。ref 建议指向种子仓中 include 了模板库 stable/canary 的验证分支。variables 可注入种子跑通所需的最小参数。",
+  "seeds": [
+    {
+      "name": "seed-go-full",
+      "project": "group/cicd/ci-seeds/go-full-pipeline",
+      "ref": "canary",
+      "variables": {
+        "CI_REQUIRE_BUILD_KEYWORD": "false"
+      }
+    },
+    {
+      "name": "seed-nodejs-docker",
+      "project": "group/cicd/ci-seeds/js-full-pipeline",
+      "ref": "canary"
+    },
+    {
+      "name": "seed-cpp-cmake",
+      "project": "group/cicd/ci-seeds/cpp-cmake-build",
+      "ref": "canary"
+    },
+    {
+      "name": "seed-python-lint-review-notify",
+      "project": "group/cicd/ci-seeds/python-lint-ai",
+      "ref": "canary"
+    }
+  ]
+}

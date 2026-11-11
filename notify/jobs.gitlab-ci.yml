@@ -1,0 +1,440 @@
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/notify/variables.gitlab-ci.yml'
+  - local: '/notify/feishu/variables.gitlab-ci.yml'
+  - local: '/notify/wework/variables.gitlab-ci.yml'
+  - local: '/notify/dingtalk/variables.gitlab-ci.yml'
+  - local: '/notify/webhook/variables.gitlab-ci.yml'
+  - local: '/notify/message/common.gitlab-ci.yml'
+  - local: '/notify/message/pipeline.gitlab-ci.yml'
+  - local: '/notify/message/deploy.gitlab-ci.yml'
+  - local: '/notify/message/scan.gitlab-ci.yml'
+  - local: '/notify/message/review.gitlab-ci.yml'
+  - local: '/notify/message/compliance.gitlab-ci.yml'
+  - local: '/notify/message/smoke.gitlab-ci.yml'
+  - local: '/notify/message/preheat.gitlab-ci.yml'
+
+stages:
+  - notify
+
+# ══════════════════════════════════════════════════════════════════
+# 公共片段（hidden job + !reference 复用，全库只有这一份状态/发送逻辑）
+#   ① .notify-resolve-api     独立 notify job 用：查 pipeline / 上游 job 状态
+#   ② .notify-resolve-inline  after_script 内嵌用：判定本 job 成功/失败
+#   ③ .notify-build-message   消息组装编排，逐层引用文案层片段
+#   ④ .notify-send-channels   渠道分发（飞书 / 企微 / 钉钉 / 通用 webhook 直连）
+#
+# 文案层按场景分文件，改某场景文案只改对应文件：
+#   notify/message/common.gitlab-ci.yml      公共字段 / 正文骨架 / 渲染 / JSON 转义
+#   notify/message/pipeline.gitlab-ci.yml    流水线 / 构建 / 制品上传 / 制品下载
+#   notify/message/deploy.gitlab-ci.yml      部署
+#   notify/message/scan.gitlab-ci.yml        代码扫描
+#   notify/message/review.gitlab-ci.yml      代码评审
+#   notify/message/compliance.gitlab-ci.yml  合规检测（正文整条自定义）
+#   notify/message/smoke.gitlab-ci.yml       冒烟测试
+#   notify/message/preheat.gitlab-ci.yml     预告通知（.notify-preheat 专用）
+# ══════════════════════════════════════════════════════════════════
+
+# ① 状态判定（独立 job 场景：查 GitLab API）
+.notify-resolve-api:
+  script:
+    - |
+      if [ "$NOTIFY_ENABLE" != "true" ]; then
+        echo "[skip] 通知未启用（NOTIFY_ENABLE=$NOTIFY_ENABLE）"; exit 0
+      fi
+      command -v curl >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache curl >/dev/null 2>&1) || true
+      command -v python3 >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache python3 >/dev/null 2>&1) || true
+
+
+      # CI 配置保护拦截：guard 失败则流水线被卡死、其余 job 均未真正执行，本次通知无意义，静默跳过。
+      #   双保险：①guard 状态文件（needs 链 artifact 传递）②API 查询（业务自定义 needs 时文件可能缺失）
+      if [ -f .ci-config-guard-result ] && [ "$(cat .ci-config-guard-result 2>/dev/null)" = "blocked" ]; then
+        echo "[skip] CI 配置保护检查未通过，流水线已被拦截，跳过通知"; exit 0
+      fi
+      if [ -n "$NOTIFY_GITLAB_TOKEN" ] && [ -n "$CI_API_V4_URL" ] && [ -n "$CI_PIPELINE_ID" ]; then
+        if curl -sS --max-time 10 -H "PRIVATE-TOKEN: $NOTIFY_GITLAB_TOKEN" "$CI_API_V4_URL/projects/$CI_PROJECT_ID/pipelines/$CI_PIPELINE_ID/jobs?per_page=100" 2>/dev/null | python3 -c 'import sys,json; js=json.loads(sys.stdin.read() or "[]"); sys.exit(0 if any(j.get("name")=="ci-config-guard" and j.get("status")=="failed" and not j.get("allow_failure") for j in js) else 1)' 2>/dev/null; then
+          echo "[skip] CI 配置保护检查未通过（ci-config-guard failed），流水线已被拦截，跳过通知"; exit 0
+        fi
+      fi
+    - !reference [.pipeline-jobs-fetch, script]
+    - |
+      # ── 查状态 (支持 pipeline / job 两种来源), 同时提取耗时(秒) ──
+      STATUS="success"; _RAW_DURATION=""
+      if [ -n "$NOTIFY_GITLAB_TOKEN" ] && [ -n "$CI_API_V4_URL" ] && [ -n "$CI_PIPELINE_ID" ]; then
+        _pipeline_jobs_fetch "$NOTIFY_GITLAB_TOKEN"
+        if [ "${NOTIFY_STATUS_SOURCE:-pipeline}" = "job" ] && [ -n "$NOTIFY_UPSTREAM_JOB" ]; then
+          # 取指定 job 的 status / duration / id，输出一行 "status duration id"
+          _TRIP=$(printf '%s' "$JOBS_JSON" | UP_JOB="$NOTIFY_UPSTREAM_JOB" python3 -c 'import sys,json,os; up=os.environ.get("UP_JOB",""); js=json.loads(sys.stdin.read() or "[]"); m=[j for j in js if j.get("name")==up]; j=m[-1] if m else None; print((j.get("status","") if j else ""), (str(int(float(j.get("duration") or 0))) if j and j.get("duration") else ""), (str(j.get("id","")) if j else ""))' 2>/dev/null || echo "")
+          S=$(printf '%s' "$_TRIP" | awk '{print $1}')
+          _RAW_DURATION=$(printf '%s' "$_TRIP" | awk '{print $2}')
+          _UP_JOB_ID=$(printf '%s' "$_TRIP" | awk '{print $3}')
+          [ -n "$S" ] && STATUS="$S"
+          printf "%s" "$NOTIFY_UPSTREAM_JOB" > .notify-status-job
+          echo "==== 状态来源: job=$NOTIFY_UPSTREAM_JOB → $STATUS (耗时 ${_RAW_DURATION:-?}s, id=${_UP_JOB_ID:-?}) ===="
+        else
+          # pipeline 汇总：notify job 自身运行时 pipeline 顶层状态必为 running，不可直接采用。
+          # 查 pipeline 全部 jobs、排除自己(CI_JOB_NAME)后聚合真实结果，避免误报「失败」。
+          # 聚合判定：排除自身 + 收尾类 job（notify/mr-verdict/scan-summary 等，见 NOTIFY_EXCLUDE_JOBS_REGEX），避免收尾 job 尚在 running 时把整体误判为 running/失败。失败/取消只看被排除后的“实质”job。
+          # 耗时取实质 job 最早 started_at 到最晚 finished_at，含 job 之间的空隙，不含 notify 自身。
+          _aggpy="${TMPDIR:-/tmp}/ci_notify_agg_$$.py"
+          cat > "$_aggpy" <<'PY'
+      import sys, os, json, re
+      from datetime import datetime
+      def parse_time(value):
+          if not value:
+              return None
+          try:
+              return datetime.fromisoformat(value.replace("Z", "+00:00"))
+          except Exception:
+              return None
+      try:
+          jobs = json.loads(sys.stdin.read() or "[]")
+      except Exception:
+          jobs = []
+      if not isinstance(jobs, list):
+          jobs = []
+      self_name = os.environ.get("SELF_JOB", "")
+      try:
+          rex = re.compile(os.environ.get("EXCLUDE_RE", "") or "^$")
+      except Exception:
+          rex = re.compile("^$")
+      core = [j for j in jobs if isinstance(j, dict) and j.get("name") != self_name and not rex.match(j.get("name") or "")]
+      failed = [j for j in core if j.get("status") == "failed" and not j.get("allow_failure")]
+      canceled = any(j.get("status") == "canceled" for j in core)
+      running = any(j.get("status") in ("running", "pending", "created") for j in core)
+      starts = [t for t in (parse_time(j.get("started_at")) for j in core) if t]
+      ends = [t for t in (parse_time(j.get("finished_at")) for j in core) if t]
+      if starts and ends:
+          span = (max(ends) - min(starts)).total_seconds()
+      else:
+          span = max([float(j.get("duration") or 0) for j in core] or [0])
+      if span < 0:
+          span = 0
+      status = "failed" if failed else "canceled" if canceled else "running" if running else "success"
+      label = "、".join(str(j.get("name", "")) for j in failed) if failed else ("全部" if status == "success" else "")
+      open(".notify-status-job", "w").write(label)
+      failed_id = str(failed[0].get("id", "")) if failed else ""
+      print(status, str(int(span)) if span else "", failed_id)
+      PY
+          _PAIR=$(printf '%s' "$JOBS_JSON" | SELF_JOB="$CI_JOB_NAME" EXCLUDE_RE="${NOTIFY_EXCLUDE_JOBS_REGEX:-^(notify.*|mr-verdict|scan-summary.*)$}" python3 "$_aggpy" 2>/dev/null || echo "")
+          S=$(printf '%s' "$_PAIR" | awk '{print $1}')
+          _RAW_DURATION=$(printf '%s' "$_PAIR" | awk '{print $2}')
+          _UP_JOB_ID=$(printf '%s' "$_PAIR" | awk '{print $3}')
+          # 仍为 running（收尾类兄弟 job 未跑完）时，有界轮询重取 pipeline jobs，等实质 job 收敛到终态，避免误报。
+          _try=0; _max="${NOTIFY_WAIT_TERMINAL_RETRIES:-6}"; _iv="${NOTIFY_WAIT_TERMINAL_INTERVAL:-3}"
+          while { [ -z "$S" ] || [ "$S" = "running" ]; } && [ "$_try" -lt "$_max" ]; do
+            sleep "$_iv"; _try=$((_try+1))
+            _pipeline_jobs_fetch "$NOTIFY_GITLAB_TOKEN"
+            _PAIR=$(printf '%s' "$JOBS_JSON" | SELF_JOB="$CI_JOB_NAME" EXCLUDE_RE="${NOTIFY_EXCLUDE_JOBS_REGEX:-^(notify.*|mr-verdict|scan-summary.*)$}" python3 "$_aggpy" 2>/dev/null || echo "")
+            S=$(printf '%s' "$_PAIR" | awk '{print $1}')
+            _RAW_DURATION=$(printf '%s' "$_PAIR" | awk '{print $2}')
+            _UP_JOB_ID=$(printf '%s' "$_PAIR" | awk '{print $3}')
+          done
+          # 轮询结束仍只有收尾 job 在跑、且没有失败或取消时，状态记为成功。
+          [ "$S" = "running" ] && S="success"
+          [ -n "$S" ] && STATUS="$S"
+          rm -f "$_aggpy"
+          echo "==== 状态来源: pipeline(聚合 jobs，排除 $CI_JOB_NAME) → $STATUS (耗时 ${_RAW_DURATION:-?}s) ===="
+        fi
+      fi
+      # 优先级：NOTIFY_STATUS_OVERRIDE > .notify-status > pipeline/job 查询结果
+      if [ -f .notify-status ]; then
+        STATUS=$(head -1 .notify-status | tr -d "[:space:]")
+      fi
+      [ -n "$NOTIFY_STATUS_OVERRIDE" ] && STATUS="$NOTIFY_STATUS_OVERRIDE"
+      case "$STATUS" in
+        success|manual)     EMOJI="✅"; STATE="成功";;
+        failed|failure)     EMOJI="❌"; STATE="失败";;
+        canceled|cancelled) EMOJI="⚠️"; STATE="取消";;
+        skipped)            EMOJI="⏭️"; STATE="跳过";;
+        running)            EMOJI="⏳"; STATE="进行中";;
+        *)                  EMOJI="❓"; STATE="未知";;
+      esac
+      export STATUS EMOJI STATE _RAW_DURATION _UP_JOB_ID
+
+# ② 状态判定（after_script 内嵌场景）
+.notify-resolve-inline:
+  script:
+    - |
+      if [ "$NOTIFY_ENABLE" != "true" ]; then
+        exit 0
+      fi
+      command -v curl >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache curl >/dev/null 2>&1) || true
+      # CI 配置保护拦截：guard 失败则本 job 属被拦流水线，通知无意义，静默跳过（状态文件经 needs artifact 传递）
+      if [ -f .ci-config-guard-result ] && [ "$(cat .ci-config-guard-result 2>/dev/null)" = "blocked" ]; then
+        echo "[skip] CI 配置保护检查未通过，流水线已被拦截，跳过通知"; exit 0
+      fi
+      # 状态判定优先级（失败信号优先，避免残留哨兵把失败误报为成功）：
+      #   1) NOTIFY_STATUS_OVERRIDE：业务显式覆盖
+      #   2) CI_JOB_STATUS 为明确失败态(failed/canceled/skipped)：直接采信，不看哨兵
+      #   3) CI_JOB_STATUS 为 success：采信成功
+      #   4) CI_JOB_STATUS 拿不到最终态(running/空，部分 runner 在 after_script 如此)：
+      #      有 .notify-status 哨兵=其内容；无=failed
+      _RAW_STATUS=""
+      if [ -n "$NOTIFY_STATUS_OVERRIDE" ]; then
+        _RAW_STATUS="$NOTIFY_STATUS_OVERRIDE"
+      else
+        case "${CI_JOB_STATUS:-}" in
+          failed|failure|canceled|cancelled|skipped) _RAW_STATUS="$CI_JOB_STATUS";;
+          success)                                   _RAW_STATUS="success";;
+          *)
+            if [ -f .notify-status ]; then _RAW_STATUS=$(head -1 .notify-status | tr -d '[:space:]'); else _RAW_STATUS="failed"; fi;;
+        esac
+      fi
+      rm -f .notify-status 2>/dev/null || true
+      case "$_RAW_STATUS" in
+        success)            STATUS="success";  EMOJI="✅"; STATE="成功";;
+        failed|failure)     STATUS="failed";   EMOJI="❌"; STATE="失败";;
+        canceled|cancelled) STATUS="canceled"; EMOJI="⚠️"; STATE="取消";;
+        skipped)            STATUS="skipped";  EMOJI="⏭️"; STATE="跳过";;
+        *)                  STATUS="failed";   EMOJI="❌"; STATE="失败";;
+      esac
+      # 耗时由 CI_JOB_STARTED_AT 推算
+      _RAW_DURATION=""
+      if [ -n "$CI_JOB_STARTED_AT" ]; then
+        _RAW_DURATION=$(python3 -c "from datetime import datetime,timezone; s=datetime.fromisoformat('$CI_JOB_STARTED_AT'.replace('Z','+00:00')); print(int((datetime.now(timezone.utc)-s).total_seconds()))" 2>/dev/null || echo "")
+      fi
+      export STATUS EMOJI STATE _RAW_DURATION
+
+# ③ 消息组装编排：逐层引用文案层片段，本文件不含任何文案内容
+#   引用顺序即执行顺序，各场景片段自带守卫，只有命中 NOTIFY_SCENARIO 的那个赋值：
+#     fields  → 复位 _MSG_CUSTOM + 公共字段（COMMIT_TITLE / TRIGGER_USER / DURATION / _PERSON_LINE ...）
+#     场景片段 → _SCN / _EXTRA（compliance 直接产出 _DEF_TITLE/_DEF_MSG 并置 _MSG_CUSTOM=1）
+#     default → 通用正文骨架（_MSG_CUSTOM=1 时跳过）
+#     artifacts → 读取已发布制品（没有发布记录，或流水线未成功，则什么都不改）
+#     render  → 模板渲染，产出 NOTIFY_TITLE / NOTIFY_MSG / NOTIFY_COMBO
+#     labels  → 渠道 payload 所需的 *_JSON
+#   改文案请改 notify/message/<场景>.gitlab-ci.yml，不要改本片段。
+.notify-build-message:
+  script:
+    - |
+      command -v python3 >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache python3 >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq python3 >/dev/null 2>&1) || true
+    - !reference [.notify-msg-fields, script]
+    - !reference [.notify-msg-pipeline, script]
+    - !reference [.notify-msg-build, script]
+    - !reference [.notify-msg-upload, script]
+    - !reference [.notify-msg-download, script]
+    - !reference [.notify-msg-deploy, script]
+    - !reference [.notify-msg-scan, script]
+    - !reference [.notify-msg-review, script]
+    - !reference [.notify-msg-compliance, script]
+    - !reference [.notify-msg-smoke, script]
+    - !reference [.notify-msg-default, script]
+    - !reference [.notify-msg-artifacts, script]
+    - !reference [.notify-msg-render, script]
+    - !reference [.notify-msg-labels, script]
+
+# ④ 渠道分发。飞书 / 企微 / 钉钉 / 通用 webhook 都 POST 到各自的机器人地址。
+#    地址为空、HTTP 非 2xx、或响应里的 code / errcode / StatusCode 不是 0，该渠道记失败。
+#    默认不因此让 job 失败。NOTIFY_FAIL_ON_ERROR=true 时，任一渠道失败则 job 失败。
+.notify-send-channels:
+  script:
+    - |
+      _notify_post() {
+        _label="$1"; _url="$2"; _data="$3"; _check_code="$4"
+        _raw=$(curl -sS --max-time 30 -w '\n%{http_code}' -X POST -H "Content-Type: application/json" -d "$_data" "$_url" 2>&1) || {
+          echo "[$_label] $(printf '%s' "$_raw" | head -c 300)"
+          return 1
+        }
+        _http=$(printf '%s' "$_raw" | tail -n 1)
+        _body=$(printf '%s' "$_raw" | sed '$d')
+        echo "[$_label] http=$_http $(printf '%s' "$_body" | head -c 240)"
+        case "$_http" in
+          2*) ;;
+          *) return 1 ;;
+        esac
+        if [ "$_check_code" = "yes" ]; then
+          printf '%s' "$_body" | python3 -c "import json,sys; raw=sys.stdin.read().strip(); d=None; exec('try:\n d=json.loads(raw) if raw else None\nexcept Exception:\n pass'); sys.exit(1 if isinstance(d, dict) and any(k in d and str(d[k])!='0' for k in ('errcode','code','StatusCode')) else 0)" || return 1
+        fi
+        return 0
+      }
+
+      FAIL_COUNT=0; SUCCESS_COUNT=0
+      for CH in $(printf '%s' "${NOTIFY_CHANNEL:-feishu}" | tr ',' ' '); do
+        CH=$(printf '%s' "$CH" | tr -d ' \r\n')
+        [ -z "$CH" ] && continue
+        echo ""
+        echo "==================== 渠道: $CH ===================="
+        RC=0
+        case "$CH" in
+          feishu)
+            if [ -z "${NOTIFY_FEISHU_WEBHOOK_URL:-}" ]; then
+              echo "[skip] NOTIFY_FEISHU_WEBHOOK_URL 未配置"; RC=1
+            else
+              SIGN_JSON=""
+              if [ -n "${NOTIFY_FEISHU_SIGN_SECRET:-}" ]; then
+                TS=$(date +%s)
+                SIGN=$(printf '' | openssl dgst -sha256 -binary -hmac "$(printf '%s\n%s' "$TS" "$NOTIFY_FEISHU_SIGN_SECRET")" | base64) || SIGN=""
+                if [ -z "$SIGN" ]; then
+                  echo "[feishu] 签名计算失败"; RC=1
+                else
+                  SIGN_JSON=",\"timestamp\":\"$TS\",\"sign\":\"$SIGN\""
+                fi
+              fi
+              if [ "$RC" = "0" ]; then
+                _notify_post feishu "$NOTIFY_FEISHU_WEBHOOK_URL" "{\"msg_type\":\"text\",\"content\":{\"text\":$NOTIFY_COMBO_JSON}$SIGN_JSON}" yes || RC=1
+              fi
+            fi
+            ;;
+          wework)
+            if [ -z "${NOTIFY_WEWORK_WEBHOOK_URL:-}" ]; then
+              echo "[skip] NOTIFY_WEWORK_WEBHOOK_URL 未配置"; RC=1
+            else
+              MOBILES_JSON=""
+              if [ -n "${NOTIFY_WEWORK_MENTIONED_MOBILES:-}" ]; then
+                M=""
+                for m in $(printf '%s' "$NOTIFY_WEWORK_MENTIONED_MOBILES" | tr ',' ' '); do
+                  [ -n "$m" ] && M="$M,\"$m\""
+                done
+                MOBILES_JSON=",\"mentioned_mobile_list\":[${M#,}]"
+              fi
+              _notify_post wework "$NOTIFY_WEWORK_WEBHOOK_URL" "{\"msgtype\":\"text\",\"text\":{\"content\":$NOTIFY_COMBO_JSON$MOBILES_JSON}}" yes || RC=1
+            fi
+            ;;
+          dingtalk)
+            if [ -z "${NOTIFY_DINGTALK_WEBHOOK_URL:-}" ]; then
+              echo "[skip] NOTIFY_DINGTALK_WEBHOOK_URL 未配置"; RC=1
+            else
+              URL="$NOTIFY_DINGTALK_WEBHOOK_URL"
+              if [ -n "${NOTIFY_DINGTALK_SIGN_SECRET:-}" ]; then
+                TS=$(($(date +%s) * 1000))
+                SIGN=$(printf '%s\n%s' "$TS" "$NOTIFY_DINGTALK_SIGN_SECRET" | openssl dgst -sha256 -binary -hmac "$NOTIFY_DINGTALK_SIGN_SECRET" | base64) || SIGN=""
+                if [ -z "$SIGN" ]; then
+                  echo "[dingtalk] 签名计算失败"; RC=1
+                else
+                  SIGN_URLENC=$(printf '%s' "$SIGN" | sed 's|+|%2B|g;s|/|%2F|g;s|=|%3D|g')
+                  case "$URL" in
+                    *\?*) URL="${URL}&timestamp=${TS}&sign=${SIGN_URLENC}" ;;
+                    *) URL="${URL}?timestamp=${TS}&sign=${SIGN_URLENC}" ;;
+                  esac
+                fi
+              fi
+              if [ "$RC" = "0" ]; then
+                AT_JSON=""
+                if [ "${NOTIFY_DINGTALK_AT_ALL:-}" = "true" ]; then
+                  AT_JSON=",\"at\":{\"isAtAll\":true}"
+                elif [ -n "${NOTIFY_DINGTALK_AT_MOBILES:-}" ]; then
+                  M=""
+                  for m in $(printf '%s' "$NOTIFY_DINGTALK_AT_MOBILES" | tr ',' ' '); do
+                    [ -n "$m" ] && M="$M,\"$m\""
+                  done
+                  AT_JSON=",\"at\":{\"atMobiles\":[${M#,}]}"
+                fi
+                _notify_post dingtalk "$URL" "{\"msgtype\":\"text\",\"text\":{\"content\":$NOTIFY_COMBO_JSON}$AT_JSON}" yes || RC=1
+              fi
+            fi
+            ;;
+          webhook)
+            if [ -z "${NOTIFY_WEBHOOK_URL:-}" ]; then
+              echo "[skip] NOTIFY_WEBHOOK_URL 未配置"; RC=1
+            else
+              _notify_post webhook "$NOTIFY_WEBHOOK_URL" "{\"text\":$NOTIFY_COMBO_JSON}" no || RC=1
+            fi
+            ;;
+          *)
+            echo "[warn] 未知渠道 $CH（支持 feishu/wework/dingtalk/webhook）"; RC=1
+            ;;
+        esac
+        if [ "$RC" = "0" ]; then SUCCESS_COUNT=$((SUCCESS_COUNT+1)); else FAIL_COUNT=$((FAIL_COUNT+1)); fi
+      done
+      echo ""
+      echo "==================== 通知结果 ===================="
+      echo "成功: $SUCCESS_COUNT, 失败: $FAIL_COUNT"
+      if [ "${NOTIFY_FAIL_ON_ERROR:-false}" = "true" ] && [ "$FAIL_COUNT" -gt 0 ]; then
+        echo "[error] 存在渠道发送失败"
+        exit 1
+      fi
+
+# ── 公共基座（独立 notify job 用）：查状态 + 组装消息 ──────────────
+.notify-base:
+  extends: .base-job
+  stage: notify
+  when: always
+  before_script:
+    - !reference [.notify-resolve-api, script]
+    - !reference [.notify-build-message, script]
+
+# 聚合入口：按 NOTIFY_CHANNEL 选择一个或多个渠道发送
+# 用法（单渠道）：
+#   my-notify:
+#     extends: .notify
+#     variables:
+#       NOTIFY_CHANNEL: "feishu"
+# 用法（多渠道，一个 job 串行发送）：
+#   my-notify:
+#     extends: .notify
+#     variables:
+#       NOTIFY_CHANNEL: "feishu,wework"
+.notify:
+  extends: .notify-base
+  variables:
+    # 纯 API 发通知，无需源码：跳过仓库克隆
+    GIT_STRATEGY: none
+  script:
+    - !reference [.notify-send-channels, script]
+
+# ── 内嵌通知（after_script 场景）───────────────────────────────
+# 用法：业务 job script 末尾标记成功，after_script 发通知
+#   my-build:
+#     extends: .build-xxx
+#     variables:
+#       NOTIFY_SCENARIO: "build"
+#     script:
+#       - ...构建步骤...
+#       - !reference [.notify-mark-success, script]   # script 全部成功才执行到此
+#     after_script:
+#       - !reference [.notify-inline, script]
+# 状态判定见 .notify-resolve-inline：失败信号(CI_JOB_STATUS)优先，其次 .notify-status 哨兵。
+# 也可不用 .notify-mark-success，直接在 script 尾部 `echo success/failed > .notify-status`。
+.notify-mark-success:
+  script:
+    - |
+      # 业务 script 全部成功才执行到此，写成功哨兵；中途失败退出则不写。
+      printf 'success' > .notify-status
+
+.notify-inline:
+  script:
+    - !reference [.notify-resolve-inline, script]
+    - !reference [.notify-build-message, script]
+    - !reference [.notify-send-channels, script]
+
+# ══════════════════════════════════════════════════════════════════
+# 预告通知（.notify-preheat）：不查 job / pipeline 状态。
+#   默认阶段 .pre。文案用 NOTIFY_PREHEAT_*，渠道用 NOTIFY_PREHEAT_CHANNEL。
+#   地址与 .notify 相同。NOTIFY_PREHEAT_STRICT=true 时发送失败则 job 失败。
+#
+#   preheat-notice:
+#     extends: .notify-preheat
+#     variables:
+#       NOTIFY_PREHEAT_TEXT: "本次将更新配置，预计 3 分钟内完成"
+#
+#   restart-notice:
+#     extends: .notify-restart-notice
+#     variables:
+#       NOTIFY_RESTART_SERVICE: "api-service"
+#       NOTIFY_RESTART_LEAD_MINUTES: "5"
+# ══════════════════════════════════════════════════════════════════
+.notify-preheat:
+  extends: .base-job
+  stage: .pre
+  script:
+    - |
+      if [ "${NOTIFY_PREHEAT_ENABLE:-true}" != "true" ]; then
+        echo "[skip] NOTIFY_PREHEAT_ENABLE=$NOTIFY_PREHEAT_ENABLE"
+        exit 0
+      fi
+      command -v python3 >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache python3 >/dev/null 2>&1) || true
+    - !reference [.notify-msg-preheat, script]
+    - |
+      NOTIFY_CHANNEL="${NOTIFY_PREHEAT_CHANNEL:-feishu}"
+      NOTIFY_COMBO_JSON="$P_COMBO_JSON"
+      NOTIFY_TITLE_JSON="$P_TITLE_JSON"
+      NOTIFY_MSG_JSON="$P_MSG_JSON"
+      NOTIFY_FAIL_ON_ERROR="${NOTIFY_PREHEAT_STRICT:-false}"
+      export NOTIFY_CHANNEL NOTIFY_COMBO_JSON NOTIFY_TITLE_JSON NOTIFY_MSG_JSON NOTIFY_FAIL_ON_ERROR
+    - !reference [.notify-send-channels, script]
+
+# 「服务重启」场景别名：文案由 NOTIFY_RESTART_SERVICE / _LEAD_MINUTES / _VERSION 组装
+.notify-restart-notice:
+  extends: .notify-preheat

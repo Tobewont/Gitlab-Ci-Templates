@@ -1,0 +1,73 @@
+workflow:
+  # CI 配置防合并覆盖前提：MR 事件必须产生 MR 流水线（guard 仅存在于 MR 流水线）；
+  #   分支有打开 MR 时去重分支流水线（保护卡在 MR 流水线，绕过分支流水线也无法合入）
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+# 合并前扫描卡点示例：MR 提交即在合并前跑扫描，任一扫描失败则 MR pipeline 失败，
+# 配合仓库设置阻止合并。全程 GitLab 原生能力，无需外部系统 / 轮询 / 评论。
+#
+# 生效两步（缺一不可）：
+#   1) 本文件：扫描 job 加 MR 触发 rules + allow_failure:false（扫描失败→job失败→pipeline失败）
+#   2) 仓库 Settings → Merge requests → 勾选 "Pipelines must succeed"
+#      （GitLab 依据 MR pipeline 成功与否放行/阻止合并）
+#
+# 卡点原理：extends 继承的扫描能力默认 allow_failure:true(不卡点)，这里覆盖为 false 即变硬卡点；
+#   GitLab CI 的 extends 对 allow_failure 是「覆盖不合并」，写 false 即生效。
+include:
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'checks/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'lint/python/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'security/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'quality/sonar/jobs.gitlab-ci.yml'
+
+stages:
+  - lint
+  - security
+  - quality
+
+variables:
+  LINT_PY_PYLINT_ENABLE: "true"
+  QUALITY_SONAR_HOST_URL: "https://sonarqube.example.com"
+
+# 仅 MR 触发的卡点规则锚点：非 MR pipeline 不跑这些卡点扫描
+.mr-only:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+# 代码规范：合并前卡点
+gate-pylint:
+  extends:
+    - .pylint
+    - .mr-only            # 只在 MR pipeline 跑
+  allow_failure: false    # 覆盖默认 true → 失败即阻塞合并
+
+# 安全扫描：合并前卡点
+gate-trivy:
+  extends:
+    - .trivy
+    - .mr-only
+  allow_failure: false
+
+# 质量门禁：合并前卡点
+gate-sonar:
+  extends:
+    - .sonar-scan
+    - .mr-only
+  allow_failure: false
+
+# CI 配置防合并覆盖：MR 源分支改动 .gitlab-ci.yml 则 guard 失败、卡死合并（.pre 阶段，先于所有 job；guard 失败则后续 job 全部不启动）
+#   默认启用（CHECKS_CI_CONFIG_GUARD_ENABLE: "true"）；显式设为 "false" 则 guard job 不创建、不作其它 job 前提（needs optional 自动豁免，零等待）
+#   guard 仅在 MR 流水线存在（模板 rules 限定），故上方 workflow rules 必须放行 merge_request_event
+ci-config-guard:
+  extends: .ci-config-guard

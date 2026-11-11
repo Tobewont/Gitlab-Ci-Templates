@@ -1,0 +1,117 @@
+# 原子能力：Merge Request 操作（拉 diff / 关闭 / 合并）
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/git/mr/variables.gitlab-ci.yml'
+
+# 通过 GitLab MR API 拉取变更 diff（仅 MR 事件有效），写入文件 $GIT_MR_DIFF_FILE
+# 用法示例：
+#   before_script:
+#     - !reference [.get-mr-diff, before_script]
+#   然后能力脚本读 $GIT_MR_DIFF_FILE
+.get-mr-diff:
+  variables:
+    GIT_MR_DIFF_FILE: "mr-diff.txt"
+  before_script:
+    - export LC_ALL="$CI_LOCALE"; export LANG="$CI_LOCALE"
+    - |
+      if [ -z "$CI_MERGE_REQUEST_IID" ]; then
+        echo "[skip] 非 MR 事件, 跳过 get-mr-diff"; : > "$GIT_MR_DIFF_FILE"; exit 0
+      fi
+      if [ -z "$GIT_MR_TOKEN" ]; then
+        echo "[skip] GIT_MR_TOKEN 未配置, 跳过 get-mr-diff"; : > "$GIT_MR_DIFF_FILE"; exit 0
+      fi
+      command -v curl >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache curl >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq curl >/dev/null 2>&1)
+      API="$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID/changes"
+      curl -sS --max-time 120 -H "PRIVATE-TOKEN: $GIT_MR_TOKEN" -H "Accept: application/json" "$API" > mr-changes.json
+      # 用 python 抽出各文件的 diff 拼成一份文本
+      command -v python3 >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache python3 >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq python3 >/dev/null 2>&1)
+      python3 -c "
+      import json, sys
+      data = json.load(open('mr-changes.json', encoding='utf-8'))
+      out = []
+      for c in data.get('changes', []):
+          if c.get('deleted_file'): continue
+          op = '新增' if c.get('new_file') else ('重命名' if c.get('renamed_file') else '修改')
+          out.append('文件: %s\n操作: %s\n---\n%s' % (c.get('new_path'), op, c.get('diff','')))
+      open('$GIT_MR_DIFF_FILE', 'w', encoding='utf-8').write('\n\n'.join(out))
+      print('MR diff 写入 $GIT_MR_DIFF_FILE (%d 个文件)' % len(out))
+      "
+
+# 关闭当前 MR（PUT /merge_requests/{iid}?state_event=close）
+# 依赖变量：GIT_MR_TOKEN（必填，有 write_repository 权限）
+#   可选：GIT_MR_CLOSE_COMMENT（附加到 description）
+#         GIT_MR_CLOSE_IID（默认走 $CI_MERGE_REQUEST_IID；非 MR 事件时用于跨 job 传递）
+.close-mr:
+  variables:
+    # 纯 MR API 操作，无需源码：跳过仓库克隆
+    GIT_STRATEGY: none
+  script:
+    - |
+      IID="${GIT_MR_CLOSE_IID:-$CI_MERGE_REQUEST_IID}"
+      if [ -z "$IID" ]; then
+        echo "[skip] .close-mr: 非 MR 事件且未指定 GIT_MR_CLOSE_IID"; exit 0
+      fi
+      if [ -z "$GIT_MR_TOKEN" ]; then
+        echo "[skip] .close-mr: GIT_MR_TOKEN 未配置"; exit 0
+      fi
+      command -v curl >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache curl >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq curl >/dev/null 2>&1)
+      URL="$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$IID"
+      if [ -n "$GIT_MR_CLOSE_COMMENT" ]; then
+        DESC=$(printf '%s' "$GIT_MR_CLOSE_COMMENT" | awk 'BEGIN{ORS=""; printf "\""} {gsub(/\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\r/,""); if (NR>1) printf "\n"; printf "%s", $0} END{printf "\""}')
+        BODY="{\"state_event\":\"close\",\"description\":$DESC}"
+      else
+        BODY='{"state_event":"close"}'
+      fi
+      echo "==> PUT $URL (关闭 MR !$IID)"
+      curl -fsSL -X PUT -H "PRIVATE-TOKEN: $GIT_MR_TOKEN" -H "Content-Type: application/json" -d "$BODY" "$URL"
+      echo ""
+      echo "MR !$IID 已关闭"
+# 合并当前 MR（PUT /merge_requests/{iid}/merge）
+# 依赖变量：GIT_MR_TOKEN（必填，有 api 权限且账号对项目有合并权限）
+#   可选：GIT_MR_MERGE_IID（默认走 $CI_MERGE_REQUEST_IID；非 MR 事件时用于跨 job 传递）
+#         GIT_MR_MERGE_WHEN_PIPELINE_SUCCEEDS（true 时用 merge_when_pipeline_succeeds，配合 Pipelines must succeed；默认 false 立即合并）
+#         GIT_MR_MERGE_REMOVE_SOURCE_BRANCH（true 时合并后删除源分支；默认 false）
+#         GIT_MR_MERGE_SQUASH（true 时 squash 合并；默认 false）
+#         GIT_MR_MERGE_COMMIT_MESSAGE（自定义合并 commit message；留空用 GitLab 默认）
+# 说明：合并被拒（如 pipeline 未成功 / 存在冲突 / 无权限 / MR 非 opened）时 curl 返回非 2xx，本能力据此失败并打印响应，便于排查
+.merge-mr:
+  script:
+    - |
+      IID="${GIT_MR_MERGE_IID:-$CI_MERGE_REQUEST_IID}"
+      if [ -z "$IID" ]; then
+        echo "[skip] .merge-mr: 非 MR 事件且未指定 GIT_MR_MERGE_IID"; exit 0
+      fi
+      if [ -z "$GIT_MR_TOKEN" ]; then
+        echo "[skip] .merge-mr: GIT_MR_TOKEN 未配置"; exit 0
+      fi
+      command -v curl >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache curl >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq curl >/dev/null 2>&1)
+      URL="$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$IID/merge"
+      # 用 form 参数（--data-urlencode）传递，避免手拼 JSON 转义
+      set -- -X PUT -H "PRIVATE-TOKEN: $GIT_MR_TOKEN"
+      if [ "$GIT_MR_MERGE_WHEN_PIPELINE_SUCCEEDS" = "true" ]; then
+        set -- "$@" --data-urlencode "merge_when_pipeline_succeeds=true"
+      fi
+      if [ "$GIT_MR_MERGE_REMOVE_SOURCE_BRANCH" = "true" ]; then
+        set -- "$@" --data-urlencode "should_remove_source_branch=true"
+      fi
+      if [ "$GIT_MR_MERGE_SQUASH" = "true" ]; then
+        set -- "$@" --data-urlencode "squash=true"
+      fi
+      if [ -n "$GIT_MR_MERGE_COMMIT_MESSAGE" ]; then
+        set -- "$@" --data-urlencode "merge_commit_message=$GIT_MR_MERGE_COMMIT_MESSAGE"
+      fi
+      echo "==> PUT $URL (合并 MR !$IID; when_pipeline_succeeds=${GIT_MR_MERGE_WHEN_PIPELINE_SUCCEEDS:-false})"
+      HTTP_CODE=$(curl -sS --max-time 60 -o merge_resp.json -w "%{http_code}" "$@" "$URL" || echo "000")
+      echo "HTTP $HTTP_CODE"
+      cat merge_resp.json 2>/dev/null || true
+      echo ""
+      case "$HTTP_CODE" in
+        2*)
+          echo "MR !$IID 合并请求已接受"
+          ;;
+        *)
+          echo "[error] .merge-mr: 合并未成功（HTTP $HTTP_CODE），可能因 pipeline 未成功 / 存在冲突 / 权限不足 / MR 非 opened"
+          exit 1
+          ;;
+      esac

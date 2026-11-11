@@ -1,0 +1,19 @@
+variables:
+  # [用户可配] Checkstyle 执行镜像。Checkstyle 14 需要 JDK 21
+  LINT_JAVA_IMAGE: "registry.example.com/cicd/library/eclipse-temurin:21-jdk-alpine"
+  # [用户可配] Checkstyle 开关
+  LINT_JAVA_CHECKSTYLE_ENABLE: "true"
+  # [用户可配] Checkstyle 版本（Maven 坐标 com.puppycrawl.tools:checkstyle）
+  LINT_JAVA_CHECKSTYLE_VERSION: "14.3.0"
+  # [用户可配] 项目配置文件。文件存在时优先于内置配置
+  LINT_JAVA_CHECKSTYLE_CONFIG: "checkstyle.xml"
+  # [用户可配] 无项目配置时使用的发行版内置配置。
+  #   /google_checks.xml  Google Java Style，UTF-8
+  #   /sun_checks.xml      Sun 代码规范
+  #   /openjdk_checks.xml  OpenJDK 规范，文件编码 US-ASCII
+  LINT_JAVA_CHECKSTYLE_BUILTIN: "/google_checks.xml"
+  # ── .checkstyle 产 Checkstyle XML（供 .upload-sonar 的 parse_checkstyle 消费）──
+  # [用户可配] 是否产出 Checkstyle XML 报告
+  LINT_JAVA_CHECKSTYLE_SONAR_REPORT: "false"
+  # [用户可配] 报告路径（.upload-sonar 用 checkstyle:<此路径> 引用）
+  LINT_JAVA_CHECKSTYLE_SONAR_REPORT_PATH: "checkstyle-report.xml"

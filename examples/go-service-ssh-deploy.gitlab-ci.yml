@@ -1,0 +1,124 @@
+workflow:
+  # CI 配置防合并覆盖前提：MR 事件必须产生 MR 流水线（guard 仅存在于 MR 流水线）；
+  #   分支有打开 MR 时去重分支流水线（保护卡在 MR 流水线，绕过分支流水线也无法合入）
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+# 业务侧 .gitlab-ci.yml 示例 · Go 服务全链路（含 SSH 部署）
+# 单测 → go 静态检查 → Sonar → Docker 构建 → 推 harbor → SSH 部署 → 通知
+# 对比 go-full-pipeline：本例把制品部署到远端主机（deploy/ssh，私钥认证）。
+# Secret 经 CI/CD Variables 注入：QUALITY_SONAR_HOST_URL / QUALITY_SONAR_TOKEN
+# （.sonar-scan 用 QUALITY_SONAR_*，未配则静默跳过）、HARBOR_USERNAME / HARBOR_PASSWORD、
+# DEPLOY_SSH_PRIVATE_KEY（建议 File 类型）、GITLAB_TOKEN。
+include:
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'ut/go/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'lint/go/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'quality/sonar/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'build/docker/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'upload/harbor/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'deploy/ssh/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'notify/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'checks/jobs.gitlab-ci.yml'
+
+stages:
+  - ut
+  - lint
+  - quality
+  - build
+  - upload
+  - deploy
+  - notify
+
+variables:
+  # ── 统一业务变量（只改此区）
+  APP_IMAGE_NAME: "cicd/$CI_PROJECT_NAME"
+  APP_IMAGE_TAG: "$CI_COMMIT_SHA"
+
+  # ── 通用变量
+  CI_ARTIFACT_RETENTION_DAYS: "7"
+
+  # ── Go 测试与静态检查变量
+  UT_GO_IMAGE: "registry.example.com/library/golang:1.23"
+  LINT_GO_IMAGE: "registry.example.com/cicd/golangci/golangci-lint:v2.14.0"
+
+  # ── Sonar 变量
+  QUALITY_SONAR_PROJECT_KEY: "${CI_PROJECT_NAMESPACE}_${CI_PROJECT_NAME}"
+  QUALITY_SONAR_GO_TEST_REPORT: "coverage.out"
+
+  # ── Docker 构建变量
+  BUILD_DOCKER_REGISTRY: "registry.example.com"
+  BUILD_DOCKER_IMAGE_NAME: "$APP_IMAGE_NAME"
+  BUILD_DOCKER_IMAGE_TAG: "$APP_IMAGE_TAG"
+
+  # ── Harbor 上传变量
+  UPLOAD_HARBOR_REGISTRY: "registry.example.com"
+  UPLOAD_HARBOR_IMAGE_NAME: "$APP_IMAGE_NAME"
+  UPLOAD_HARBOR_IMAGE_TAG: "$APP_IMAGE_TAG"
+
+  # ── SSH 部署变量（远端拉取新镜像并重启容器）
+  DEPLOY_SSH_HOSTS: "192.168.192.200"
+  DEPLOY_SSH_USERNAME: "root"
+  DEPLOY_SSH_PRIVATE_KEY: "$SSH_PRIVATE_KEY"
+  DEPLOY_SSH_COMMAND: "docker rm -f $CI_PROJECT_NAME 2>/dev/null || true; docker run -d -p 8001:8080 --name $CI_PROJECT_NAME registry.example.com/$APP_IMAGE_NAME:$APP_IMAGE_TAG"
+
+my-unit-test:
+  extends: .go-ut
+  artifacts:
+    expire_in: "7 days"
+
+my-golangci:
+  extends: .golangci-lint
+
+my-sonar:
+  extends: .sonar-scan
+  needs:
+    - job: my-unit-test
+      optional: true
+
+my-docker-build:
+  extends: .docker-build
+  needs:
+    - my-unit-test
+    - my-golangci
+
+my-harbor-push:
+  extends: .harbor-push
+  needs:
+    - my-docker-build
+
+my-ssh-deploy:
+  extends: .deploy-ssh
+  needs:
+    - my-harbor-push
+
+my-notify:
+  extends: .notify
+  stage: notify
+  needs:
+    - job: my-ssh-deploy
+      optional: true
+
+# CI 配置防合并覆盖：MR 源分支改动 .gitlab-ci.yml 则 guard 失败、卡死合并（.pre 阶段，先于所有 job；guard 失败则后续 job 全部不启动）
+#   默认启用（CHECKS_CI_CONFIG_GUARD_ENABLE: "true"）；显式设为 "false" 则 guard job 不创建、不作其它 job 前提（needs optional 自动豁免，零等待）
+#   guard 仅在 MR 流水线存在（模板 rules 限定），故上方 workflow rules 必须放行 merge_request_event
+ci-config-guard:
+  extends: .ci-config-guard

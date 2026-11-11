@@ -1,0 +1,39 @@
+# 原子能力：Go 单元测试
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/ut/go/variables.gitlab-ci.yml'
+
+stages:
+  - ut
+
+.go-ut:
+  extends: .base-job
+  image: $UT_GO_IMAGE
+  stage: ut
+  variables:
+    STEP_NAME: "Go Unit Test"
+    STEP_ENABLE: "$UT_GO_ENABLE"
+  script:
+    - !reference [.skip-if-disabled, script]
+    - |
+      # GOPROXY:
+      #   1. UT_GO_GOPROXY 显式设置 → 用它
+      #   2. USE_CHINA_MIRROR=true (默认) → goproxy.cn
+      #   3. USE_CHINA_MIRROR=false → 不设置 (用 go 环境或系统默认)
+      if [ -z "$UT_GO_GOPROXY" ] && [ "${USE_CHINA_MIRROR:-true}" = "true" ]; then
+        UT_GO_GOPROXY="https://goproxy.cn,direct"
+      fi
+      [ -n "$UT_GO_GOPROXY" ] && export GOPROXY="$UT_GO_GOPROXY"
+      COV_ARGS=""
+      [ -n "$UT_GO_COVERAGE_FILE" ] && COV_ARGS="-covermode=$UT_GO_COVERAGE_MODE -coverprofile=$UT_GO_COVERAGE_FILE"
+      go test $UT_GO_EXTRA_ARGS $COV_ARGS $UT_GO_TARGET
+      [ -n "$UT_GO_COVERAGE_FILE" ] && [ -f "$UT_GO_COVERAGE_FILE" ] && go tool cover -func "$UT_GO_COVERAGE_FILE" | tail -1
+  coverage: '/total:\s+\(statements\)\s+([0-9.]+)%/'
+  artifacts:
+    when: always
+    paths:
+      - $UT_GO_COVERAGE_FILE
+    expire_in: "7 days"

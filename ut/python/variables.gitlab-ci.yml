@@ -1,0 +1,26 @@
+variables:
+  # [用户可配] Python 测试执行镜像（建议与业务侧 python 版本对齐）
+  UT_PYTHON_IMAGE: "registry.example.com/docker/library/python:3.8.13-slim-buster"
+  # [用户可配] 单元测试开关
+  UT_PYTHON_ENABLE: "true"
+  # [用户可配] pip 依赖文件（相对仓库根；支持 requirements.txt / requirements/local.txt 等）
+  UT_PYTHON_REQUIREMENTS: "requirements.txt"
+  # [用户可配] pip 索引源
+  UT_PYTHON_PIP_INDEX: "https://mirrors.aliyun.com/pypi/simple/"
+  # [用户可配] 需从 requirements 中过滤掉的包（逗号分隔，正则不敏感匹配行）
+  #   典型：mysqlclient（需编译，slim 镜像装不上；用 sqlite 测试时也不需要）
+  UT_PYTHON_EXCLUDE_PACKAGES: ""
+  # [用户可配] 是否在 slim 镜像内安装 git（requirements 含 git+https 私有依赖时需要）
+  UT_PYTHON_INSTALL_GIT: "false"
+  # [用户可配] 额外 apt 系统依赖（空格分隔，如 "gcc libmariadbclient-dev"；仅 debian/ubuntu 镜像）
+  UT_PYTHON_APT_PACKAGES: ""
+  # [用户可配] 是否为 EOL 的 debian buster 切换 archive 源（buster slim 镜像装 apt 包时需要）
+  UT_PYTHON_DEBIAN_BUSTER_ARCHIVE: "false"
+  # [用户可配] 测试命令（pytest / python -m pytest / django test 等）
+  UT_PYTHON_TEST_CMD: "pytest"
+  # [用户可配] 测试命令额外参数（如 --ds=xxx.settings.test 指定 Django settings、-p no:cacheprovider 等）
+  UT_PYTHON_TEST_ARGS: "-p no:cacheprovider"
+  # [用户可配] junit 报告输出路径（留空则不产出）
+  UT_PYTHON_JUNIT_REPORT: "report.xml"
+  # [用户可配] 收集到 0 个用例（pytest exit 5）时是否视为通过（项目暂无单测时用 true）
+  UT_PYTHON_ALLOW_NO_TESTS: "true"

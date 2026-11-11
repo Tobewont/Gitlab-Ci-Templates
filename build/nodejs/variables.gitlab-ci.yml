@@ -1,0 +1,24 @@
+variables:
+  # [用户可配] Node.js 构建镜像
+  BUILD_NODE_IMAGE: "registry.example.com/library/node:24.12.0"
+  # [用户可配] Node.js 构建开关
+  BUILD_NODE_ENABLE: "true"
+  # [用户可配] 包管理器：npm / yarn / cnpm / pnpm
+  BUILD_NODE_PACKAGE_MANAGER: "npm"
+  # [用户可配] npm/yarn registry
+  #   留空 + USE_CHINA_MIRROR=true → registry.npmmirror.com
+  #   留空 + USE_CHINA_MIRROR=false → registry.npmjs.org
+  #   显式设置则完全覆盖 (业务侧内网源等场景)
+  BUILD_NODE_REGISTRY: ""
+  # [用户可配] 安装命令（留空则按包管理器自动：npm ci / yarn install --frozen-lockfile / cnpm i / pnpm i）
+  BUILD_NODE_INSTALL_CMD: ""
+  # [用户可配] 构建命令（如 "npm run build" / "yarn run build:prod"）
+  BUILD_NODE_BUILD_CMD: "npm run build"
+  # [用户可配] Node 内存上限（MB），设置后导出 NODE_OPTIONS=--max_old_space_size=<value>
+  BUILD_NODE_MAX_OLD_SPACE_SIZE: ""
+  # [用户可配] 额外 .env 文件内容（写入 .env.local，供 Vue/React 项目消费；含机密请走 CI/CD Variables）
+  BUILD_NODE_ENV_FILE_CONTENT: ""
+  # [用户可配] 额外 .env 文件路径（默认 .env.local）
+  BUILD_NODE_ENV_FILE_PATH: ".env.local"
+  # [用户可配] 构建产物路径（GitLab artifacts）
+  BUILD_NODE_ARTIFACT_PATH: "dist"

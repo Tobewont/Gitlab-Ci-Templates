@@ -1,0 +1,7 @@
+variables:
+  # [用户可配] GitLeaks 敏感信息扫描开关
+  SEC_GITLEAKS_ENABLE: "true"
+  # [用户可配] GitLeaks 执行镜像
+  SEC_GITLEAKS_IMAGE: "registry.example.com/cicd/gitleaks:latest"
+  SEC_GITLEAKS_CONFIG: ""             # 可选：自定义 gitleaks.toml 路径
+  SEC_GITLEAKS_EXIT_CODE: "0"         # 发现泄露时的退出码

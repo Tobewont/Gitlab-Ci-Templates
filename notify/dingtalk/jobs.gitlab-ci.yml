@@ -1,0 +1,14 @@
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/notify/variables.gitlab-ci.yml'
+  - local: '/notify/jobs.gitlab-ci.yml'
+  - local: '/notify/dingtalk/variables.gitlab-ci.yml'
+
+# 钉钉自定义群机器人。地址 NOTIFY_DINGTALK_WEBHOOK_URL，可选 NOTIFY_DINGTALK_SIGN_SECRET、NOTIFY_DINGTALK_AT_MOBILES、NOTIFY_DINGTALK_AT_ALL。
+.notify-dingtalk:
+  extends: .notify-base
+  variables:
+    NOTIFY_CHANNEL: "dingtalk"
+  script:
+    - !reference [.notify-send-channels, script]

@@ -1,0 +1,245 @@
+# 原子能力：业务规则检查（文件排除 / 敏感词 / DB 事务 / 文档检测）
+# 通用能力，业务侧只需通过 CHECKS_*_CMD 提供工具命令
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/checks/variables.gitlab-ci.yml'
+
+stages:
+  - checks
+
+# 文件排除检查（禁止提交某些文件）
+.file-exclusion-check:
+  extends: .base-job
+  image: $CHECKS_FILE_EXCLUSION_IMAGE
+  stage: checks
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "文件排除检查"
+    STEP_ENABLE: "$CHECKS_FILE_EXCLUSION_ENABLE"
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（CHECKS_FILE_EXCLUSION_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      if [ -z "$CHECKS_FILE_EXCLUSION_CMD" ]; then
+        echo "[skip] CHECKS_FILE_EXCLUSION_CMD 未配置"; exit 0
+      fi
+      eval "$CHECKS_FILE_EXCLUSION_CMD \
+        --project \"$CI_PROJECT_NAME\" \
+        --rules \"$CHECKS_FILE_EXCLUSION_RULES\" \
+        --level \"$CHECKS_FILE_EXCLUSION_LEVEL\""
+
+# 敏感词检查：执行使用方提供的完整命令
+.sensitive-word-check:
+  extends: .base-job
+  image: $CHECKS_SENSITIVE_WORD_IMAGE
+  stage: checks
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "敏感词过滤"
+    STEP_ENABLE: "$CHECKS_SENSITIVE_WORD_ENABLE"
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（CHECKS_SENSITIVE_WORD_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      if [ -z "$CHECKS_SENSITIVE_WORD_CMD" ]; then
+        echo "[skip] CHECKS_SENSITIVE_WORD_CMD 未配置"; exit 0
+      fi
+      eval "$CHECKS_SENSITIVE_WORD_CMD"
+
+# DB 事务检查
+.db-trans-check:
+  extends: .base-job
+  image: $CHECKS_DB_TRANS_IMAGE
+  stage: checks
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "DB 事务检查"
+    STEP_ENABLE: "$CHECKS_DB_TRANS_ENABLE"
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（CHECKS_DB_TRANS_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      if [ -z "$CHECKS_DB_TRANS_CMD" ]; then
+        echo "[skip] CHECKS_DB_TRANS_CMD 未配置"; exit 0
+      fi
+      eval "$CHECKS_DB_TRANS_CMD" > db-trans-check.log
+      cat db-trans-check.log
+  artifacts:
+    when: always
+    paths:
+      - db-trans-check.log
+    expire_in: "7 days"
+
+# 文档必要性检测
+.doc-detect:
+  extends: .base-job
+  image: $CHECKS_DOC_DETECT_IMAGE
+  stage: checks
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "文档检测"
+    STEP_ENABLE: "$CHECKS_DOC_DETECT_ENABLE"
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（CHECKS_DOC_DETECT_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      if [ -z "$CHECKS_DOC_DETECT_CMD" ]; then
+        echo "[skip] CHECKS_DOC_DETECT_CMD 未配置"; exit 0
+      fi
+      git config --global --add safe.directory "$(pwd)" || true
+      eval "$CHECKS_DOC_DETECT_CMD \"$CI_PROJECT_NAME\""
+
+# CI 配置防合并覆盖检查：MR 流水线中源分支改动受保护文件则失败，卡死合并；
+#   分支自身 push 不受限。配合项目 "All pipelines must succeed" 生效
+# 前置约束：本模板检查/扫描类原子能力（checks/lint/security/quality/review 下各 job）均
+#   needs 本 job（optional）——guard 失败则一律不启动；未接入 guard 的流水线自动豁免、保持并行。
+#   其余无 needs 的 job（build/notify/scan-summary 等）由 stage 顺序天然阻塞， guard 失败同样不启动。
+#   接入约定：job 名必须叫 ci-config-guard。
+# 开关：CHECKS_CI_CONFIG_GUARD_ENABLE（默认 "true"）。显式设为 "false" 时本 job 不创建
+#   （rules 级），needs 本 job 的各 job 经 optional 自动豁免、零等待，即 guard 不作其它 job 前提。
+#   本 job 仅在 MR 流水线创建（rules 限定）；push 流水线不含本 job，下游同样无需等待。
+.ci-config-guard:
+  extends: .base-job
+  image: $CHECKS_IMAGE
+  stage: .pre
+  needs: []
+  allow_failure: false
+  rules:
+    - if: '$CHECKS_CI_CONFIG_GUARD_ENABLE == "false"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - when: never
+  variables:
+    STEP_NAME: "CI 配置保护检查"
+    STEP_ENABLE: "$CHECKS_CI_CONFIG_GUARD_ENABLE"
+  script:
+    - |
+      # 状态文件：经 artifacts 传递给下游，供 when: always 的 job 判定是否被拦截（needs 拦不住 always job）
+      echo pass > .ci-config-guard-result
+      # rules 已保证仅 MR 流水线且显式 false 时不创建；此处兜底变量未定义/非 true 的场景（如未 include 变量文件）
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（CHECKS_CI_CONFIG_GUARD_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      git config --global --add safe.directory "$(pwd)" || true
+      # 浅克隆下先拉到目标分支
+      git fetch -q --deepen=50 origin "+$CI_MERGE_REQUEST_TARGET_BRANCH_NAME:refs/remotes/origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" 2>/dev/null || true
+      if ! git rev-parse "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" >/dev/null 2>&1; then
+        echo "[warn] 未拉到目标分支 origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME，跳过"; exit 0
+      fi
+      # 按内容比对：仅当源分支 HEAD 与目标分支 HEAD 上受保护文件内容不同时拦截。
+      # 不按 merge-base 历史 diff，避免源分支即使已把改动同步为目标分支同款内容也被误拦。
+      DIFFERED=""
+      for f in $CHECKS_CI_CONFIG_GUARD_PATHS; do
+        SRC_H=$(git ls-tree HEAD -- "$f" 2>/dev/null | awk '{print $3}')
+        TGT_H=$(git ls-tree "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" -- "$f" 2>/dev/null | awk '{print $3}')
+        # 源分支不存在该文件视为业务未接入/走别的机制，不拦截
+        if [ -z "$SRC_H" ]; then continue; fi
+        if [ "$SRC_H" != "$TGT_H" ]; then
+          DIFFERED="$DIFFERED $f"
+        fi
+      done
+      DIFFERED=$(echo "$DIFFERED" | sed 's/^ *//')
+      if [ -n "$DIFFERED" ]; then
+        echo blocked > .ci-config-guard-result
+        echo "[fail] 源分支的 CI 配置文件与目标分支不一致："
+        for f in $DIFFERED; do echo "  $f"; done
+        echo "约定：CI 配置只允许直接 push 目标分支修改，源分支需与目标分支保持一致后再合并"
+        exit 1
+      fi
+      echo "[pass] 源分支与目标分支的受保护 CI 配置文件内容一致"
+  artifacts:
+    when: always
+    paths:
+      - .ci-config-guard-result
+
+# 执行镜像工具链自检：校验 CHECKS_TOOLCHAIN_COMMANDS 中命令均存在
+.toolchain-preflight:
+  extends: .base-job
+  image: $CHECKS_TOOLCHAIN_IMAGE
+  stage: checks
+  variables:
+    STEP_NAME: "Toolchain Preflight"
+    STEP_ENABLE: "$CHECKS_TOOLCHAIN_ENABLE"
+  script:
+    - |
+      set -eu
+      case "$STEP_ENABLE" in
+        false) echo "[skip] $STEP_NAME 未启用（CHECKS_TOOLCHAIN_ENABLE=$STEP_ENABLE）"; exit 0 ;;
+        true) ;;
+        *) echo "[error] CHECKS_TOOLCHAIN_ENABLE 必须为 true/false"; exit 1 ;;
+      esac
+      [ -n "$CHECKS_TOOLCHAIN_COMMANDS" ] || { echo "[error] CHECKS_TOOLCHAIN_COMMANDS 未配置"; exit 1; }
+      missing=0
+      for command_name in $CHECKS_TOOLCHAIN_COMMANDS; do
+        command -v "$command_name" >/dev/null 2>&1 || { echo "[missing] $command_name"; missing=1; }
+      done
+      [ "$missing" -eq 0 ] || { echo "[error] 执行镜像缺少必需命令"; exit 1; }
+      case "$CHECKS_TOOLCHAIN_REQUIRE_CURL_FAIL_WITH_BODY" in
+        true) curl --help all 2>/dev/null | grep -q -- '--fail-with-body' || { echo "[error] curl 版本过低，缺少 --fail-with-body"; exit 1; } ;;
+        false) ;;
+        *) echo "[error] CHECKS_TOOLCHAIN_REQUIRE_CURL_FAIL_WITH_BODY 必须为 true/false"; exit 1 ;;
+      esac
+      echo "[ok] 工具链自检通过"
+
+# git 仓库凭据可达性自检：对 CHECKS_GIT_AUTH_REPOS 每行做 git ls-remote 校验
+.git-auth-preflight:
+  extends: .base-job
+  image: $CHECKS_GIT_AUTH_IMAGE
+  stage: checks
+  variables:
+    STEP_NAME: "Git Auth Preflight"
+    STEP_ENABLE: "$CHECKS_GIT_AUTH_ENABLE"
+  script:
+    - |
+      set -eu
+      case "$STEP_ENABLE" in
+        false) echo "[skip] $STEP_NAME 未启用（CHECKS_GIT_AUTH_ENABLE=$STEP_ENABLE）"; exit 0 ;;
+        true) ;;
+        *) echo "[error] CHECKS_GIT_AUTH_ENABLE 必须为 true/false"; exit 1 ;;
+      esac
+      command -v git >/dev/null 2>&1 || { echo "[error] 执行镜像缺少命令: git"; exit 1; }
+      [ -n "$CHECKS_GIT_AUTH_REPOS" ] || { echo "[error] CHECKS_GIT_AUTH_REPOS 未配置"; exit 1; }
+      AUTH_DIR="$CI_PROJECT_DIR/.ci-git-auth-preflight"
+      rm -rf "$AUTH_DIR"; mkdir -m 700 "$AUTH_DIR"
+      trap 'rm -rf "$AUTH_DIR"' EXIT HUP INT TERM
+      ASKPASS="$AUTH_DIR/askpass.sh"
+      cat > "$ASKPASS" <<'ASKEOF'
+      #!/bin/sh
+      case "$1" in *Username*) printf '%s\n' "$AUTH_USER";; *Password*) printf '%s\n' "$AUTH_TOKEN";; *) exit 1;; esac
+      ASKEOF
+      chmod 700 "$ASKPASS"
+      checked=0
+      repos_file="$AUTH_DIR/repos.txt"
+      printf '%s\n' "$CHECKS_GIT_AUTH_REPOS" > "$repos_file"
+      while IFS='|' read -r repo_url auth_user auth_token ref; do
+        [ -n "$repo_url" ] || continue
+        [ -n "$auth_user" ] && [ -n "$auth_token" ] || { echo "[error] 仓库条目缺少 username/token: $repo_url"; exit 1; }
+        AUTH_USER=$auth_user AUTH_TOKEN=$auth_token; export AUTH_USER AUTH_TOKEN
+        if [ -n "$ref" ]; then
+          GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code "$repo_url" "refs/heads/$ref" >/dev/null || { echo "[error] 仓库不可达或分支不存在: $repo_url ($ref)"; exit 1; }
+          echo "[ok] $repo_url ($ref)"
+        else
+          GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 git ls-remote "$repo_url" >/dev/null || { echo "[error] 仓库不可达: $repo_url"; exit 1; }
+          echo "[ok] $repo_url"
+        fi
+        checked=$((checked + 1))
+      done < "$repos_file"
+      [ "$checked" -gt 0 ] || { echo "[error] CHECKS_GIT_AUTH_REPOS 未解析出有效仓库条目"; exit 1; }
+      echo "[ok] git 仓库凭据自检通过（$checked 个仓库）"

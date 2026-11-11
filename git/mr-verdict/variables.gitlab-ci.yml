@@ -1,0 +1,33 @@
+variables:
+  # ── .mr-verdict（MR 检测结论回帖 / 可选关闭）─────────────────────
+  # [用户可配] GitLab API token。默认 GITLAB_TOKEN
+  GIT_MR_VERDICT_TOKEN: "$GITLAB_TOKEN"
+  # GIT_MR_VERDICT_* 未单独赋值时取 MR_VERDICT_*。
+  MR_VERDICT_ENABLE: "true"
+  MR_VERDICT_CHECK_JOBS: ""
+  MR_VERDICT_DETAIL_URL: ""
+  MR_VERDICT_AUTO_CLOSE: "false"
+  MR_VERDICT_EXTRACT: ""
+  MR_VERDICT_EXTRACT_MAX: "50"
+  MR_VERDICT_BODY_FILE: ".git-comment-body"
+
+  # [用户可配] 是否启用
+  GIT_MR_VERDICT_ENABLE: "$MR_VERDICT_ENABLE"
+  # [用户可配] 关注并分项展示的 job 名（逗号分隔，按顺序展示）。留空则只展示总体结论。
+  #   例："prettier,eslint" / "clang-format,clang-tidy"
+  GIT_MR_VERDICT_CHECK_JOBS: "$MR_VERDICT_CHECK_JOBS"
+  # [用户可配] 检出问题时附带的详情链接（如 Sonar issues 页）。留空则不附。
+  #   支持占位：$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+  GIT_MR_VERDICT_DETAIL_URL: "$MR_VERDICT_DETAIL_URL"
+  # [用户可配] 存在被拦截的必检项时是否自动关闭 MR（默认 false：仅回帖提示，不关闭）
+  GIT_MR_VERDICT_AUTO_CLOSE: "$MR_VERDICT_AUTO_CLOSE"
+  # [用户可配] 可选：对失败的关注 job 从其日志提取明细附到评论。
+  #   格式："job|match正则|exclude正则|strip正则"，多组用 ; 分隔；match 必填，后两项可空。
+  #   分隔符为 |，单个正则内部不要再用 |（可用字符类替代）。
+  #   例（prettier 失败列出格式不合规文件）：
+  #     "prettier|^\\[warn\\] |Code style issues|^\\[warn\\] *"
+  GIT_MR_VERDICT_EXTRACT: "$MR_VERDICT_EXTRACT"
+  # [用户可配] 单个 job 日志提取的最大条数
+  GIT_MR_VERDICT_EXTRACT_MAX: "$MR_VERDICT_EXTRACT_MAX"
+  # [用户可配] 结论评论输出文件（交给 .git-comment-post 发送）
+  GIT_MR_VERDICT_BODY_FILE: "$MR_VERDICT_BODY_FILE"

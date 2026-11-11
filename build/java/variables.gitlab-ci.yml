@@ -1,0 +1,13 @@
+variables:
+  # [用户可配] Java Maven 构建镜像
+  BUILD_JAVA_IMAGE: "registry.example.com/cicd/library/eclipse-temurin:21-jdk-alpine"
+  # [用户可配] Maven 构建开关
+  BUILD_JAVA_MAVEN_ENABLE: "true"
+  # [用户可配] Maven 目标（如 clean package / clean deploy）
+  BUILD_JAVA_MAVEN_GOALS: "clean package -DskipTests"
+  # [用户可配] Maven 额外参数
+  BUILD_JAVA_MAVEN_EXTRA_ARGS: ""
+  # [用户可配] 自定义 settings.xml 路径（留空则用镜像默认）
+  BUILD_JAVA_MAVEN_SETTINGS: ""
+  # [用户可配] 构建产物路径（用于 GitLab artifacts）
+  BUILD_JAVA_ARTIFACT_PATH: "target/*.jar"

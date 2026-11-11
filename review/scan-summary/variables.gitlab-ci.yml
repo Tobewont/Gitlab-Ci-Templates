@@ -1,0 +1,19 @@
+variables:
+  # [用户可配] scan-summary 执行镜像
+  REVIEW_SCAN_SUMMARY_IMAGE: "$CI_BASE_IMAGE"
+  # [用户可配] scan-summary 开关
+  REVIEW_SCAN_SUMMARY_ENABLE: "true"
+
+  # [用户可配] 输入报告清单，与 QUALITY_UPLOAD_SONAR_INPUTS 同格式
+  # "pylint:pylint-report.txt,eslint:eslint-report.json,trivy:trivy.json,gitleaks:gitleaks.json,semgrep:semgrep.json"
+  REVIEW_SCAN_SUMMARY_INPUTS: ""
+
+  # [用户可配] 阈值判定（超过则整个 job 失败；0=不阻断）
+  REVIEW_SCAN_FAIL_ON_CRITICAL: "0"
+  REVIEW_SCAN_FAIL_ON_MAJOR: "0"
+  REVIEW_SCAN_FAIL_ON_MINOR: "0"
+
+  # [用户可配] 是否向 MR / commit 发送评论（默认 true）
+  REVIEW_SCAN_SUMMARY_POST_COMMENT: "true"
+  # [用户可配] 发评论用的 GitLab API token。默认 GITLAB_TOKEN
+  REVIEW_SCAN_SUMMARY_GITLAB_TOKEN: "$GITLAB_TOKEN"

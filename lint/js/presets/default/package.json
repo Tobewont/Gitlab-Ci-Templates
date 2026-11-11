@@ -1,0 +1,15 @@
+{
+  "name": "ci-lint-js-default",
+  "version": "0.0.0",
+  "private": true,
+  "description": "CI 模板库默认 package.json，仅用于 lint/js（eslint/prettier）在无 package.json 仓库的依赖兜底",
+  "devDependencies": {
+    "eslint": "8.49.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint-config-prettier": "^10.1.5",
+    "eslint-plugin-prettier": "^5.4.1",
+    "prettier": "3.6.2",
+    "typescript": "^4.9.5"
+  }
+}

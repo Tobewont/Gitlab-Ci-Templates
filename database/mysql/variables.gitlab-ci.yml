@@ -1,0 +1,48 @@
+variables:
+  # ── MySQL 连接信息（通过业务项目 CI/CD Variables 注入；供 .mysql-query/.mysql-exec 使用，单一事实源）────
+  # [用户注入] 数据库主机
+  MYSQL_HOST: ""
+  # [用户注入] 端口
+  MYSQL_PORT: "3306"
+  # [用户注入] 用户名
+  MYSQL_USERNAME: ""
+  # [用户注入] 密码（务必配置为 masked / protected 的 CI/CD Variable，勿写入仓库）
+  MYSQL_PASSWORD: ""
+  # [用户注入] 库名（如 config_public）
+  MYSQL_DATABASE: ""
+
+  # ── 通用执行配置（.mysql-query / .mysql-exec 共用）─────────────────
+  # [用户可配] 执行镜像（需含 python3 + pip）
+  MYSQL_IMAGE: "python:3.11-alpine"
+  # [用户可配] pip 安装 pymysql 用的索引源（默认阿里云）
+  MYSQL_PIP_INDEX: "https://mirrors.aliyun.com/pypi/simple/"
+  # [用户可配] DB 连接超时（秒）；网络不通时快速失败，避免 job 挂死
+  MYSQL_CONNECT_TIMEOUT: "15"
+  # [用户可配] DB 读写超时（秒）
+  MYSQL_RW_TIMEOUT: "30"
+
+  # ── .mysql-query（参数化 SELECT）─────────────────────────────────
+  # [用户可配] 查询开关
+  MYSQL_QUERY_ENABLE: "true"
+  # [用户可配] SELECT 语句（%s 占位，禁止字符串拼接值）
+  MYSQL_QUERY_SQL: ""
+  # [用户可配] 查询参数（JSON 数组，与 %s 占位一一对应）
+  MYSQL_QUERY_PARAMS: "[]"
+  # [用户可配] 结果输出文件（JSON：{"rowcount":N,"rows":[[...],...]}）
+  MYSQL_QUERY_OUTPUT_FILE: "mysql-query.json"
+
+  # ── .mysql-exec（参数化写操作：INSERT/UPDATE/DELETE/DDL）───────────
+  # [用户可配] 写操作开关
+  MYSQL_EXEC_ENABLE: "true"
+  # [用户可配] 写 SQL（%s 占位，禁止字符串拼接值；标识符请自行白名单校验后用反引号包裹）
+  MYSQL_EXEC_SQL: ""
+  # [用户可配] 写参数（JSON 数组，与 %s 占位一一对应）
+  MYSQL_EXEC_PARAMS: "[]"
+  # [用户可配] 期望影响行数；留空不校验，配置后不符即回滚失败
+  MYSQL_EXEC_EXPECT_ROWS: ""
+  # [用户可配] true 时只执行不提交（回滚），用于首次验证
+  MYSQL_EXEC_DRY_RUN: "false"
+  # [用户可配] 命名锁名称；非空则写库前 GET_LOCK 串行化（留空不加锁）
+  MYSQL_EXEC_LOCK_NAME: ""
+  # [用户可配] 等待命名锁的最长秒数；超时则失败，不并发写库
+  MYSQL_EXEC_LOCK_TIMEOUT: "60"

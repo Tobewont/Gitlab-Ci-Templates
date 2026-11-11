@@ -1,0 +1,89 @@
+workflow:
+  # CI 配置防合并覆盖前提：MR 事件必须产生 MR 流水线（guard 仅存在于 MR 流水线）；
+  #   分支有打开 MR 时去重分支流水线（保护卡在 MR 流水线，绕过分支流水线也无法合入）
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+# 多点通知示例：sonar 完就通知、build 完就通知，各自独立不等 pipeline 结束
+# 方案 A: 独立 notify job (通过 NOTIFY_STATUS_SOURCE=job 查上游 job 状态)
+# 方案 C: after_script 内嵌 (script 末尾 .notify-mark-success 标记成功)
+include:
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'checks/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'quality/sonar/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'build/docker/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'notify/jobs.gitlab-ci.yml'
+
+stages:
+  - quality
+  - notify-quality       # sonar 通知
+  - build
+  - notify-final         # 末尾汇总通知
+
+variables:
+  # ── Sonar 能力变量
+  QUALITY_SONAR_HOST_URL: "https://sonarqube.example.com"
+
+  # ── Docker 能力变量
+  BUILD_DOCKER_REGISTRY: "registry.example.com"
+  BUILD_DOCKER_IMAGE_NAME: "myapp/service"
+  BUILD_DOCKER_AUTO_PUSH: "true"
+
+  # ── 通知能力变量
+  NOTIFY_CHANNEL: "feishu"
+  # NOTIFY_FEISHU_WEBHOOK_URL 经 CI/CD Variables masked 注入。
+
+# ── 方案 A：独立 notify job (查上游 job 状态) ─────────────────
+my-sonar:
+  extends: .sonar-scan
+
+notify-sonar:
+  extends: .notify
+  stage: notify-quality
+  needs: [my-sonar]
+  when: always                                 # sonar 失败也发通知
+  variables:
+    NOTIFY_SCENARIO: "scan"
+    NOTIFY_STATUS_SOURCE: "job"                # 查 job 状态而非 pipeline
+    NOTIFY_UPSTREAM_JOB: "my-sonar"
+
+# ── 方案 C：after_script 内嵌通知 ─────
+my-docker:
+  extends: .docker-build
+  needs: [my-sonar]
+  variables:
+    NOTIFY_SCENARIO: "build"
+  script:
+    - !reference [.docker-build, script]
+    - !reference [.notify-mark-success, script]   # script 全部成功才标记
+  after_script:
+    - !reference [.notify-inline, script]
+
+# ── 末尾汇总通知 (默认查 pipeline 整体状态) ───────────────────
+notify-final:
+  extends: .notify
+  stage: notify-final
+  needs:
+    - job: my-sonar
+      optional: true
+    - job: my-docker
+      optional: true
+  when: always
+  variables:
+    NOTIFY_SCENARIO: "pipeline"                # 汇总整个 pipeline
+
+# CI 配置防合并覆盖：MR 源分支改动 .gitlab-ci.yml 则 guard 失败、卡死合并（.pre 阶段，先于所有 job；guard 失败则后续 job 全部不启动）
+#   默认启用（CHECKS_CI_CONFIG_GUARD_ENABLE: "true"）；显式设为 "false" 则 guard job 不创建、不作其它 job 前提（needs optional 自动豁免，零等待）
+#   guard 仅在 MR 流水线存在（模板 rules 限定），故上方 workflow rules 必须放行 merge_request_event
+ci-config-guard:
+  extends: .ci-config-guard

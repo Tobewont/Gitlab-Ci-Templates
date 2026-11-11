@@ -1,0 +1,54 @@
+# 原子能力：PHP 单元测试（phpunit / 通用）
+# 支持：可选 composer install（配镜像源）、junit 报告、无测试用例容错。
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/ut/php/variables.gitlab-ci.yml'
+
+stages:
+  - ut
+
+.phpunit:
+  extends: .base-job
+  image: $UT_PHP_IMAGE
+  stage: ut
+  variables:
+    STEP_NAME: "PHP Unit Test"
+    STEP_ENABLE: "$UT_PHP_ENABLE"
+  script:
+    - !reference [.skip-if-disabled, script]
+    - |
+      set -eu
+      export LC_ALL=C.UTF-8; export LANG=C.UTF-8
+
+      # ── 可选：composer install ──
+      if [ "$UT_PHP_COMPOSER_INSTALL" = "true" ] && [ -f composer.json ]; then
+        if command -v composer >/dev/null 2>&1; then
+          [ -n "$UT_PHP_COMPOSER_MIRROR" ] && composer config -g repos.packagist composer "$UT_PHP_COMPOSER_MIRROR"
+          composer install $UT_PHP_COMPOSER_ARGS
+        else
+          echo "[warn] 镜像内无 composer，跳过依赖安装"
+        fi
+      fi
+
+      # ── 执行测试 ──
+      JUNIT_ARG=""
+      [ -n "$UT_PHP_JUNIT_REPORT" ] && JUNIT_ARG="--log-junit $UT_PHP_JUNIT_REPORT"
+      set +e
+      OUT=$($UT_PHP_TEST_CMD $UT_PHP_TEST_ARGS $JUNIT_ARG 2>&1)
+      RC=$?
+      set -e
+      printf '%s\n' "$OUT"
+      # phpunit exit 0=通过；无测试用例时 phpunit 可能非 0 并提示 "No tests executed"
+      if [ "$RC" != "0" ] && [ "$UT_PHP_ALLOW_NO_TESTS" = "true" ] && printf '%s' "$OUT" | grep -q "No tests executed"; then
+        echo "[warn] 未发现测试用例，按配置视为通过"
+        exit 0
+      fi
+      exit $RC
+  artifacts:
+    when: always
+    paths:
+      - $UT_PHP_JUNIT_REPORT
+    reports:
+      junit: $UT_PHP_JUNIT_REPORT
+    expire_in: "7 days"

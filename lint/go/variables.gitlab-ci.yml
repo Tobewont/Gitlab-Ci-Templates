@@ -1,0 +1,20 @@
+variables:
+  # [用户可配] Go 静态检查执行镜像
+  LINT_GO_IMAGE: "registry.example.com/cicd/golangci/golangci-lint:v2.14.0"
+  # [用户可配] 各原子能力开关
+  LINT_GO_VET_ENABLE: "true"
+  LINT_GO_GOLANGCI_ENABLE: "true"
+  LINT_GO_REVIVE_ENABLE: "false"
+  LINT_GO_IMPORT_CHECK_ENABLE: "false"
+  # [用户可配] golangci-lint 配置文件（留空则用仓库默认）
+  LINT_GO_GOLANGCI_CONFIG: ".golangci.yml"
+  # [用户可配] 是否写出 golangci-lint JSON 报告，供 .upload-sonar 以 golangci: 前缀转换（默认关闭）
+  LINT_GO_GOLANGCI_SONAR_REPORT: "false"
+  # [用户可配] golangci-lint JSON 报告路径
+  LINT_GO_GOLANGCI_SONAR_REPORT_PATH: "golangci-report.json"
+  # [用户可配] revive 配置文件（留空则不指定）
+  LINT_GO_REVIVE_CONFIG: "revive.toml"
+  # [用户可配] revive 执行镜像（内置 revive 二进制）
+  LINT_GO_REVIVE_IMAGE: "registry.example.com/cicd/revive:1.2.4"
+  # [用户可配] 引用检测镜像（需内置 goimportcheck；无公开等价镜像，使用前由使用方填写）
+  LINT_GO_IMPORT_CHECK_IMAGE: ""

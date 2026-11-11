@@ -1,0 +1,37 @@
+# 原子能力：Android 多渠道分包（Walle）
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/build/android/variables.gitlab-ci.yml'
+
+stages:
+  - build
+
+.channel-package:
+  extends: .base-job
+  image: $BUILD_ANDROID_IMAGE
+  stage: build
+  variables:
+    STEP_NAME: "Android 多渠道分包"
+    STEP_ENABLE: "$BUILD_ANDROID_CHANNEL_ENABLE"
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（BUILD_ANDROID_CHANNEL_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      if [ -z "$BUILD_ANDROID_CHANNEL_APK" ] || [ ! -f "$BUILD_ANDROID_CHANNEL_APK" ]; then
+        echo "[skip] BUILD_ANDROID_CHANNEL_APK 未配置或文件不存在"; exit 0
+      fi
+      mkdir -p "$BUILD_ANDROID_CHANNEL_OUTPUT"
+
+      if [ -z "$BUILD_ANDROID_WALLE_CHANNELS" ]; then
+        echo "[skip] walle 分包缺少 BUILD_ANDROID_WALLE_CHANNELS"; exit 0
+      fi
+      java -jar "$BUILD_ANDROID_WALLE_JAR" batch -c "$BUILD_ANDROID_WALLE_CHANNELS" "$BUILD_ANDROID_CHANNEL_APK" "$BUILD_ANDROID_CHANNEL_OUTPUT"
+      chmod -R a+w "$BUILD_ANDROID_CHANNEL_OUTPUT" || true
+      ls -l "$BUILD_ANDROID_CHANNEL_OUTPUT"
+  artifacts:
+    when: always
+    paths:
+      - $BUILD_ANDROID_CHANNEL_OUTPUT/
+    expire_in: "7 days"

@@ -1,0 +1,191 @@
+# 原子能力：MySQL 通用增删改查（.mysql-query 查询 / .mysql-exec 写操作）
+# 只提供数据库原子操作，不含任何业务表结构或业务规则。
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/database/mysql/variables.gitlab-ci.yml'
+
+stages:
+  - publish
+
+# ── .mysql-query：参数化 SELECT，结果写 JSON 文件 ────────────────
+# 输入：MYSQL_QUERY_SQL（必填，SELECT 语句，%s 占位）/ MYSQL_QUERY_PARAMS（JSON 数组）
+# 输出：MYSQL_QUERY_OUTPUT_FILE（JSON：{"rowcount":N,"rows":[[...],...]}）
+# 安全：连接变量缺失 fail-closed；参数全占位转义；密码不打印
+.mysql-query:
+  extends: .base-job
+  image: $MYSQL_IMAGE
+  stage: publish
+  needs: []
+  variables:
+    STEP_NAME: "mysql-query"
+    STEP_ENABLE: "$MYSQL_QUERY_ENABLE"
+    STEP_ARTIFACT: ""
+  script:
+    - !reference [.skip-if-disabled, script]
+    - |
+      set -eu
+      MISSING=""
+      [ -z "${MYSQL_HOST:-}" ]     && MISSING="$MISSING MYSQL_HOST"
+      [ -z "${MYSQL_USERNAME:-}" ]     && MISSING="$MISSING MYSQL_USERNAME"
+      [ -z "${MYSQL_DATABASE:-}" ] && MISSING="$MISSING MYSQL_DATABASE"
+      [ -z "${MYSQL_PASSWORD:-}" ] && MISSING="$MISSING MYSQL_PASSWORD"
+      if [ -n "$MISSING" ]; then
+        echo "[error] mysql-query 缺少必需的 DB 连接变量（请在 CI/CD Variables 注入，MYSQL_PASSWORD 建议 masked）:$MISSING"; exit 1
+      fi
+      [ -n "${MYSQL_QUERY_SQL:-}" ] || { echo "[error] mysql-query 已启用但 MYSQL_QUERY_SQL 未配置"; exit 1; }
+      PIP_ARGS="-i ${MYSQL_PIP_INDEX:-https://mirrors.aliyun.com/pypi/simple/}"
+      python3 -c "import pymysql" 2>/dev/null || pip install $PIP_ARGS --quiet pymysql || { echo "[error] pymysql 安装失败，请检查 MYSQL_PIP_INDEX 或改用内置 pymysql 的镜像"; exit 1; }
+    - |
+      cat > mysql_query.py <<'PYEOF'
+      import json, os, sys
+      import pymysql
+
+      SQL    = os.environ["MYSQL_QUERY_SQL"]
+      OUTPUT = os.environ.get("MYSQL_QUERY_OUTPUT_FILE", "mysql-query.json")
+      try:
+          params = json.loads(os.environ.get("MYSQL_QUERY_PARAMS", "[]"))
+      except Exception as e:
+          print("[error] MYSQL_QUERY_PARAMS 必须是 JSON 数组：%s" % e); sys.exit(1)
+      if not isinstance(params, list):
+          print("[error] MYSQL_QUERY_PARAMS 必须是 JSON 数组"); sys.exit(1)
+
+      try:
+          conn = pymysql.connect(
+              host=os.environ["MYSQL_HOST"],
+              port=int(os.environ.get("MYSQL_PORT", "3306")),
+              user=os.environ["MYSQL_USERNAME"],
+              password=os.environ.get("MYSQL_PASSWORD", ""),
+              database=os.environ["MYSQL_DATABASE"],
+              charset="utf8mb4",
+              connect_timeout=int(os.environ.get("MYSQL_CONNECT_TIMEOUT", "15")),
+              read_timeout=int(os.environ.get("MYSQL_RW_TIMEOUT", "30")),
+          )
+      except Exception as e:
+          print("[error] 连接数据库失败（检查 MYSQL_HOST/PORT 网络可达性与账号）：%s" % e); sys.exit(1)
+      try:
+          with conn.cursor() as cur:
+              cur.execute(SQL, params)
+              rows = cur.fetchall()
+      except Exception as e:
+          print("[error] 查询执行失败，未做任何变更：%s" % e); sys.exit(1)
+      finally:
+          conn.close()
+      with open(OUTPUT, "w", encoding="utf-8") as fh:
+          json.dump({"rowcount": len(rows), "rows": [list(r) for r in rows]}, fh,
+                    ensure_ascii=False, default=str, separators=(",", ":"))
+      print("[ok] 查询完成，%d 行写入 %s" % (len(rows), OUTPUT))
+      PYEOF
+      python3 mysql_query.py
+  artifacts:
+    when: always
+    expire_in: "1 day"
+    paths:
+      - $MYSQL_QUERY_OUTPUT_FILE
+
+# ── .mysql-exec：参数化写操作（INSERT/UPDATE/DELETE/DDL），事务 + 行数校验 + 可选命名锁 ──
+# 输入：MYSQL_EXEC_SQL（必填，%s 占位）/ MYSQL_EXEC_PARAMS（JSON 数组）
+#       MYSQL_EXEC_EXPECT_ROWS（可选，期望影响行数，不符则回滚失败）
+#       MYSQL_EXEC_DRY_RUN=true 只执行不提交（回滚），用于首次验证
+#       MYSQL_EXEC_LOCK_NAME（可选，非空则 GET_LOCK 串行化同名写库）
+# 安全：autocommit=False；异常即回滚；行数不符即回滚；锁在 finally 释放
+.mysql-exec:
+  extends: .base-job
+  image: $MYSQL_IMAGE
+  stage: publish
+  needs: []
+  variables:
+    STEP_NAME: "mysql-exec"
+    STEP_ENABLE: "$MYSQL_EXEC_ENABLE"
+    STEP_ARTIFACT: ""
+  script:
+    - !reference [.skip-if-disabled, script]
+    - |
+      set -eu
+      MISSING=""
+      [ -z "${MYSQL_HOST:-}" ]     && MISSING="$MISSING MYSQL_HOST"
+      [ -z "${MYSQL_USERNAME:-}" ]     && MISSING="$MISSING MYSQL_USERNAME"
+      [ -z "${MYSQL_DATABASE:-}" ] && MISSING="$MISSING MYSQL_DATABASE"
+      [ -z "${MYSQL_PASSWORD:-}" ] && MISSING="$MISSING MYSQL_PASSWORD"
+      if [ -n "$MISSING" ]; then
+        echo "[error] mysql-exec 缺少必需的 DB 连接变量（请在 CI/CD Variables 注入，MYSQL_PASSWORD 建议 masked）:$MISSING"; exit 1
+      fi
+      [ -n "${MYSQL_EXEC_SQL:-}" ] || { echo "[error] mysql-exec 已启用但 MYSQL_EXEC_SQL 未配置"; exit 1; }
+      PIP_ARGS="-i ${MYSQL_PIP_INDEX:-https://mirrors.aliyun.com/pypi/simple/}"
+      python3 -c "import pymysql" 2>/dev/null || pip install $PIP_ARGS --quiet pymysql || { echo "[error] pymysql 安装失败，请检查 MYSQL_PIP_INDEX 或改用内置 pymysql 的镜像"; exit 1; }
+    - |
+      cat > mysql_exec.py <<'PYEOF'
+      import json, os, sys
+      import pymysql
+      from pymysql.constants import CLIENT
+
+      SQL = os.environ["MYSQL_EXEC_SQL"]
+      try:
+          params = json.loads(os.environ.get("MYSQL_EXEC_PARAMS", "[]"))
+      except Exception as e:
+          print("[error] MYSQL_EXEC_PARAMS 必须是 JSON 数组：%s" % e); sys.exit(1)
+      if not isinstance(params, list):
+          print("[error] MYSQL_EXEC_PARAMS 必须是 JSON 数组"); sys.exit(1)
+      expect_raw = os.environ.get("MYSQL_EXEC_EXPECT_ROWS", "").strip()
+      expect = None
+      if expect_raw:
+          if not expect_raw.isdigit():
+              print("[error] MYSQL_EXEC_EXPECT_ROWS 必须是非负整数"); sys.exit(1)
+          expect = int(expect_raw)
+      dry_run = os.environ.get("MYSQL_EXEC_DRY_RUN", "false")
+      if dry_run not in ("true", "false"):
+          print("[error] MYSQL_EXEC_DRY_RUN 必须为 true/false"); sys.exit(1)
+      dry_run = dry_run == "true"
+      lock_name = os.environ.get("MYSQL_EXEC_LOCK_NAME", "").strip()
+      lock_timeout = int(os.environ.get("MYSQL_EXEC_LOCK_TIMEOUT", "60"))
+      lock_acquired = False
+
+      try:
+          conn = pymysql.connect(
+              host=os.environ["MYSQL_HOST"],
+              port=int(os.environ.get("MYSQL_PORT", "3306")),
+              user=os.environ["MYSQL_USERNAME"],
+              password=os.environ.get("MYSQL_PASSWORD", ""),
+              database=os.environ["MYSQL_DATABASE"],
+              charset="utf8mb4",
+              autocommit=False,
+              connect_timeout=int(os.environ.get("MYSQL_CONNECT_TIMEOUT", "15")),
+              read_timeout=int(os.environ.get("MYSQL_RW_TIMEOUT", "30")),
+              write_timeout=int(os.environ.get("MYSQL_RW_TIMEOUT", "30")),
+              client_flag=CLIENT.FOUND_ROWS,
+          )
+      except Exception as e:
+          print("[error] 连接数据库失败（检查 MYSQL_HOST/PORT 网络可达性与账号）：%s" % e); sys.exit(1)
+      try:
+          with conn.cursor() as cur:
+              if lock_name and not dry_run:
+                  cur.execute("SELECT GET_LOCK(%s, %s)", (lock_name, lock_timeout))
+                  if cur.fetchone()[0] != 1:
+                      raise RuntimeError("等待写库锁超时或失败，未执行任何 SQL")
+                  lock_acquired = True
+                  print("已获取写库锁（同名锁的 pipeline 将串行执行）")
+              cur.execute(SQL, params)
+              affected = cur.rowcount
+              if expect is not None and affected != expect:
+                  raise RuntimeError("影响行数 %d 与期望 %d 不符，回滚" % (affected, expect))
+              if dry_run:
+                  conn.rollback()
+                  print("[dry-run] SQL 执行成功，影响 %d 行，已回滚未提交" % affected)
+              else:
+                  conn.commit()
+                  print("[ok] SQL 已提交，影响 %d 行" % affected)
+      except Exception as e:
+          conn.rollback()
+          print("[error] 执行异常，已回滚：%s" % e); sys.exit(1)
+      finally:
+          if lock_acquired:
+              try:
+                  with conn.cursor() as cur:
+                      cur.execute("SELECT RELEASE_LOCK(%s)", (lock_name,))
+              except Exception:
+                  pass
+          conn.close()
+      PYEOF
+      python3 mysql_exec.py

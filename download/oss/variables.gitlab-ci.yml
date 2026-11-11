@@ -1,0 +1,17 @@
+variables:
+  DOWNLOAD_OSS_ENABLE: "true"
+  DOWNLOAD_OSS_IMAGE: "registry.example.com/cicd/ossutil:1.0.1"
+  DOWNLOAD_OSS_TYPE: "file"
+  DOWNLOAD_OSS_ACCESS_KEY_ID: ""
+  DOWNLOAD_OSS_ACCESS_KEY_SECRET: ""
+  DOWNLOAD_OSS_ENDPOINT: ""
+  # oss://bucket/prefix，不含待下载的相对文件列表
+  DOWNLOAD_OSS_BASE_URL: ""
+  # file: 逗号分隔相对对象路径；directory: 单个相对 prefix
+  DOWNLOAD_OSS_PATHS: ""
+  DOWNLOAD_OSS_DEST_DIR: ".downloads/oss"
+  DOWNLOAD_OSS_MAX_FILES: "1000"
+  DOWNLOAD_OSS_MAX_FILE_BYTES: "1073741824"
+  DOWNLOAD_OSS_MAX_TOTAL_BYTES: "2147483648"
+  DOWNLOAD_OSS_DOTENV_FILE: "download-oss.env"
+  DOWNLOAD_OSS_MANIFEST_FILE: "download-oss.json"

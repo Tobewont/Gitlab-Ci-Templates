@@ -1,0 +1,22 @@
+variables:
+  # ── Sonar 共享配置（scan / provision / gate 共用）──
+  # [用户可配] Sonar 扫描执行镜像（内置 sonar-scanner）
+  QUALITY_SONAR_IMAGE: "registry.example.com/cicd/sonarsource/sonar-scanner-cli:v5.0.1"
+  # [用户可配] Sonar 扫描开关
+  QUALITY_SONAR_ENABLE: "true"
+
+  # ── Sonar 服务器 ────────────────────────────────────────────
+  # [用户可配] SonarQube 地址（扫描与报告页共用；按实际环境覆盖）
+  QUALITY_SONAR_HOST_URL: "https://sonarqube.example.com"
+  # [用户可配] 分析分支（Developer Edition 及以上支持分支分析；社区版留空）；MR 场景常配 $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+  QUALITY_SONAR_BRANCH: ""
+  # [用户必配] Sonar token，在 GitLab CI/CD Variables 中 masked 注入
+  QUALITY_SONAR_TOKEN: ""
+
+  # ── 项目参数 ─────────────────────────────────────────────────
+  # [用户可配] Sonar 项目 Key
+  #   默认 $CI_PROJECT_PATH_SLUG（如 group-cicd-aaa）保证全局唯一，不同 group 下同名项目不冲突
+  #   如需保留既有 Sonar 项目历史数据，业务侧显式覆盖此变量
+  QUALITY_SONAR_PROJECT_KEY: "$CI_PROJECT_PATH_SLUG"
+  # [用户可配] .sonar-scan 产出的 report-task.txt 路径（sonar-scanner 默认写入 .scannerwork/；scan 产出、gate 消费）
+  QUALITY_SONAR_REPORT_TASK: ".scannerwork/report-task.txt"

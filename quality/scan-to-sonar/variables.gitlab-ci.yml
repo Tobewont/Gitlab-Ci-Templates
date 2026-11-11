@@ -1,0 +1,9 @@
+# 旧变量名 QUALITY_SCAN_TO_SONAR_*。现行变量为 QUALITY_UPLOAD_SONAR_*（quality/upload-sonar/variables.gitlab-ci.yml）。
+# upload-sonar 在新变量为空时读取这里的值。
+include:
+  - local: '/quality/upload-sonar/variables.gitlab-ci.yml'
+
+variables:
+  QUALITY_SCAN_TO_SONAR_ENABLE: "true"
+  QUALITY_SCAN_TO_SONAR_INPUTS: ""
+  QUALITY_SCAN_TO_SONAR_OUTPUT: "sonar-external-issues.json"

@@ -1,0 +1,71 @@
+# 原子能力：Cocos Creator 命令行构建
+# 依赖 Cocos Creator 编辑器（专用 runner），默认路由到 tags: [cocos]
+# Cocos Creator 官方约定退出码 36 = 构建成功
+# https://docs.cocos.com/creator/manual/en/editor/publish/publish-in-command-line.html
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/build/cocos/variables.gitlab-ci.yml'
+
+stages:
+  - build
+
+.cocos-build:
+  extends: .base-job
+  image: $BUILD_COCOS_IMAGE
+  stage: build
+  tags:
+    - cocos
+  variables:
+    STEP_NAME: "Cocos Build"
+    STEP_ENABLE: "$BUILD_COCOS_ENABLE"
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（BUILD_COCOS_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      if [ -z "$BUILD_COCOS_CONFIG_PATH" ]; then
+        echo "[skip] BUILD_COCOS_CONFIG_PATH 未配置"; exit 0
+      fi
+      if [ ! -f "$BUILD_COCOS_PROJECT_DIR/$BUILD_COCOS_CONFIG_PATH" ]; then
+        echo "错误：构建配置文件不存在 $BUILD_COCOS_PROJECT_DIR/$BUILD_COCOS_CONFIG_PATH"; exit 1
+      fi
+      cd "$BUILD_COCOS_PROJECT_DIR"
+      set +e
+      "$BUILD_COCOS_BINARY" --project . --build "configPath=$BUILD_COCOS_CONFIG_PATH" $BUILD_COCOS_EXTRA_ARGS
+      RC=$?
+      if [ "$RC" != "36" ] && [ "$RC" != "0" ]; then
+        echo "Cocos 构建失败 exit=$RC"; exit "$RC"
+      fi
+      echo "Cocos 构建成功 (exit=$RC)"
+  artifacts:
+    when: always
+    paths:
+      - $BUILD_COCOS_PROJECT_DIR/$BUILD_COCOS_ARTIFACT_PATH
+    expire_in: "7 days"
+
+# Windows PowerShell 版本（Windows Cocos runner）
+.cocos-build-windows:
+  stage: build
+  tags:
+    - cocos
+    - windows
+  variables:
+    STEP_NAME: "Cocos Build (Windows)"
+    STEP_ENABLE: "$BUILD_COCOS_ENABLE"
+  script:
+    - |
+      if ($env:STEP_ENABLE -ne "true") { Write-Host "[skip] $env:STEP_NAME 未启用（BUILD_COCOS_ENABLE=$env:STEP_ENABLE）"; exit 0 }
+      if (-not $env:BUILD_COCOS_CONFIG_PATH) { Write-Host "[skip] BUILD_COCOS_CONFIG_PATH 未配置"; exit 0 }
+      $configFull = Join-Path $env:BUILD_COCOS_PROJECT_DIR $env:BUILD_COCOS_CONFIG_PATH
+      if (-not (Test-Path $configFull)) { Write-Error "构建配置文件不存在 $configFull"; exit 1 }
+      Set-Location $env:BUILD_COCOS_PROJECT_DIR
+      & $env:BUILD_COCOS_BINARY --project . --build "configPath=$env:BUILD_COCOS_CONFIG_PATH" $env:BUILD_COCOS_EXTRA_ARGS
+      $rc = $LASTEXITCODE
+      if ($rc -ne 36 -and $rc -ne 0) { Write-Error "Cocos 构建失败 exit=$rc"; exit $rc }
+      Write-Host "Cocos 构建成功 (exit=$rc)"
+  artifacts:
+    when: always
+    paths:
+      - $BUILD_COCOS_PROJECT_DIR/$BUILD_COCOS_ARTIFACT_PATH
+    expire_in: "7 days"

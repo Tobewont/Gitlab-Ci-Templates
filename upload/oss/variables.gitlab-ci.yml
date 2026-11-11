@@ -1,0 +1,20 @@
+variables:
+  # [用户可配] ossutil 执行镜像
+  UPLOAD_OSS_IMAGE: "registry.example.com/cicd/ossutil:1.0.1"
+  # [用户可配] 上传开关
+  UPLOAD_OSS_ENABLE: "true"
+  # [用户可配] OSS 凭据（通过 GitLab CI/CD Variables masked 注入）
+  UPLOAD_OSS_ACCESS_KEY_ID: ""
+  UPLOAD_OSS_ACCESS_KEY_SECRET: ""
+  # [用户可配] OSS Endpoint（如 oss-cn-hangzhou.aliyuncs.com）
+  UPLOAD_OSS_ENDPOINT: ""
+  # [用户可配] OSS 基础 URL（如 oss://my-bucket/prefix）
+  UPLOAD_OSS_BASE_URL: ""
+  # [用户可配] 上传源路径（文件或目录）
+  UPLOAD_OSS_LOCAL_PATH: ""
+  # [用户可配] 上传目标相对路径（追加到 BASE_URL 后；上传目录时留空 = 同名铺开）
+  UPLOAD_OSS_REMOTE_PATH: ""
+  # [用户可配] 是否递归上传目录
+  UPLOAD_OSS_RECURSIVE: "false"
+  # [用户可配] 是否强制覆盖（等同 ossutil --force）
+  UPLOAD_OSS_FORCE: "false"

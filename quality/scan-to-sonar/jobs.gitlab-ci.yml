@@ -1,0 +1,7 @@
+# include quality/scan-to-sonar/jobs.gitlab-ci.yml 等价于 quality/upload-sonar。
+# .scan-to-sonar 与 .upload-sonar 是同一个 job。
+include:
+  - local: '/quality/upload-sonar/jobs.gitlab-ci.yml'
+
+.scan-to-sonar:
+  extends: .upload-sonar

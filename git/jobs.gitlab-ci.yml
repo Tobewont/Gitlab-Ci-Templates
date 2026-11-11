@@ -1,0 +1,17 @@
+# Git / GitLab 相关操作原子能力（聚合入口）
+# 各能力已按子目录拆分；业务侧可只 include 需要的子目录：
+#   changed-files  .get-changed-files / .changes / .filter-changed-files / .get-changed-folders
+#   mr             .get-mr-diff / .close-mr / .merge-mr
+#   comment        .git-comment-post / .git-comment（GIT_COMMENT_TARGET=commit 时评论 commit）
+#   mr-verdict     .mr-verdict（按 allow_failure 泛化判定 blocked，回帖结论并可选关闭 MR）
+#   job-log .git-job-log / .git-job-log-job（按 job 名拉日志并按正则提取内容）
+#   auth           .git-https-auth / .submodule-checkout
+#   version        .git-describe / .get-commit-keyword
+include:
+  - local: '/git/changed-files/jobs.gitlab-ci.yml'
+  - local: '/git/mr/jobs.gitlab-ci.yml'
+  - local: '/git/comment/jobs.gitlab-ci.yml'
+  - local: '/git/mr-verdict/jobs.gitlab-ci.yml'
+  - local: '/git/job-log/jobs.gitlab-ci.yml'
+  - local: '/git/auth/jobs.gitlab-ci.yml'
+  - local: '/git/version/jobs.gitlab-ci.yml'

@@ -1,0 +1,57 @@
+# 示例：业务侧用公共能力 .mr-verdict 替代手写的 mr-comment 脚本
+#
+# 判定/回帖/关闭/日志提取等逻辑全部在公共模板库（git/mr-verdict + git/job-log），
+# 业务侧只保留"编排（stage/needs/extends）+ 配置（变量）"。
+# 后续因"允许失败"等需求调整，通常只改变量值，不动逻辑：
+#   - 让某 job 允许失败不拦截：在该 job 上加 allow_failure: true（mr-verdict 自动豁免）
+#   - 评论分项展示哪些 job：改 GIT_MR_VERDICT_CHECK_JOBS
+#   - 是否自动关闭 MR：改 GIT_MR_VERDICT_AUTO_CLOSE
+#   - 失败时附日志明细（如 prettier 失败文件列表）：配 GIT_MR_VERDICT_EXTRACT
+include:
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'git/jobs.gitlab-ci.yml'
+
+# 本地约定锚点（业务侧自定义，非公共能力）：
+# .mr-always —— MR 事件触发且上游失败也运行（when: always），用于回帖/通知等收尾环节
+# .on-k8s    —— 指定走 k8s shared runner（kubernetes executor，支持 image）
+.mr-always:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: always
+
+.on-k8s:
+  tags:
+    - k8s
+
+# JS 项目：prettier(allow_failure:true) + eslint(必检)
+mr-comment:
+  extends:
+    - .mr-verdict
+    - .mr-always
+    - .on-k8s
+  stage: notify
+  allow_failure: true
+  needs:
+    - job: ci-config-guard
+      optional: true
+    - job: prettier
+      optional: true
+    - job: eslint
+      optional: true
+  variables:
+    GIT_MR_VERDICT_CHECK_JOBS: "prettier,eslint"
+    GIT_MR_VERDICT_DETAIL_URL: "https://sonarqube.example.com/project/issues?branch=$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME&id=$QUALITY_SONAR_PROJECT_KEY&resolved=false"
+    GIT_MR_VERDICT_AUTO_CLOSE: "false"
+    # prettier 失败时，从其日志提取格式不合规文件列表附到评论（去 [warn] 前缀、排除汇总行）
+    # 格式："job|match|exclude|strip"，分隔符为 |，单个正则内部不要再用 |
+    GIT_MR_VERDICT_EXTRACT: "prettier|^\\[warn\\] |Code style issues|^\\[warn\\] *"
+
+# ── 也可单独使用 .git-job-log 抽取任意 job 日志内容 ──
+# extract-eslint-errors:
+#   extends: [.git-job-log-job, .mr-always, .on-k8s]
+#   stage: notify
+#   variables:
+#     GIT_JOB_LOG_JOB: "eslint"
+#     GIT_JOB_LOG_MATCH: "error"
+#     GIT_JOB_LOG_OUTPUT: ".eslint-errors"

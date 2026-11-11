@@ -1,0 +1,97 @@
+workflow:
+  # CI 配置防合并覆盖前提：MR 事件必须产生 MR 流水线（guard 仅存在于 MR 流水线）；
+  #   分支有打开 MR 时去重分支流水线（保护卡在 MR 流水线，绕过分支流水线也无法合入）
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+# 扫描汇总示例：多工具扫描 → 转 Sonar 通用格式 → Sonar 上传 + 汇总评论到 MR/commit
+include:
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'lint/python/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'security/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'quality/upload-sonar/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'quality/sonar/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'review/scan-summary/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'notify/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'checks/jobs.gitlab-ci.yml'
+
+stages:
+  - lint
+  - security
+  - quality
+  - review
+  - notify
+
+variables:
+  # ── 统一业务变量（只改此区）
+  # 扫描输入清单（各能力输出为 artifact；upload-sonar / scan-summary 消费）
+  SCAN_INPUTS: "pylint:pylint-report.txt,trivy:trivy.json,gitleaks:gitleaks.json,semgrep:semgrep.json"
+
+  # ── 扫描转换与汇总变量
+  QUALITY_UPLOAD_SONAR_INPUTS: "$SCAN_INPUTS"
+  REVIEW_SCAN_SUMMARY_INPUTS: "$SCAN_INPUTS"
+
+  # 阈值判定：CRITICAL/MAJOR 超过 0 阻断 pipeline
+  REVIEW_SCAN_FAIL_ON_CRITICAL: "0"
+  REVIEW_SCAN_FAIL_ON_MAJOR: "10"
+
+  # ── Sonar 变量（消费汇总的 externalIssues）
+  QUALITY_SONAR_EXTERNAL_ISSUES: "sonar-external-issues.json"
+  QUALITY_SONAR_HOST_URL: "https://sonarqube.example.com"
+
+# ── lint 层：并发执行 ──
+my-pylint:
+  extends: .pylint
+
+# ── security 层：并发执行 ──
+my-trivy:
+  extends: .trivy
+
+my-gitleaks:
+  extends: .gitleaks
+
+my-semgrep:
+  extends: .semgrep
+
+# ── quality 层：汇总转 Sonar 通用格式 + Sonar 上传 ──
+my-upload-sonar:
+  extends: .upload-sonar
+
+my-sonar:
+  extends: .sonar-scan
+  # 依赖 upload-sonar 输出的 artifact
+  needs:
+    - my-upload-sonar
+
+# ── review 层：汇总所有扫描 → 输出日志 + 评论 MR/commit + 阈值判定 ──
+my-scan-summary:
+  extends: .scan-summary
+
+# ── notify ──
+my-notify:
+  extends: .notify
+  needs:
+    - job: my-scan-summary
+      optional: true
+
+# CI 配置防合并覆盖：MR 源分支改动 .gitlab-ci.yml 则 guard 失败、卡死合并（.pre 阶段，先于所有 job；guard 失败则后续 job 全部不启动）
+#   默认启用（CHECKS_CI_CONFIG_GUARD_ENABLE: "true"）；显式设为 "false" 则 guard job 不创建、不作其它 job 前提（needs optional 自动豁免，零等待）
+#   guard 仅在 MR 流水线存在（模板 rules 限定），故上方 workflow rules 必须放行 merge_request_event
+ci-config-guard:
+  extends: .ci-config-guard

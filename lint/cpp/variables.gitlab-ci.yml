@@ -1,0 +1,44 @@
+variables:
+  # [用户可配] C/C++ 静态检查执行镜像（内置 clang-tidy / clang-format）
+  LINT_CPP_IMAGE: "registry.example.com/cicd/silkeh/clang:20.1.8-tools"
+  # [用户可配] cppcheck 执行镜像（内置 cppcheck）
+  LINT_CPP_CPPCHECK_IMAGE: "registry.example.com/cicd/neszt/cppcheck-docker:2.10.1"
+
+  # ── clang-tidy ────────────────────────────────────────────────
+  # [用户可配] clang-tidy 开关
+  LINT_CPP_CLANG_TIDY_ENABLE: "true"
+  # [用户可配] compile_commands.json 目录（clang-tidy 依赖）
+  LINT_CPP_CLANG_TIDY_COMPILE_COMMANDS_DIR: "build"
+  # [用户可配] 检查目标（默认变更的 .c/.cc/.cpp/.h 文件）
+  LINT_CPP_CLANG_TIDY_TARGET: ""
+  # [用户可配] clang-tidy 配置文件（.clang-tidy）；留空且项目无 .clang-tidy 时跳过检查。
+  LINT_CPP_CLANG_TIDY_CONFIG: ""
+  # [用户可配] clang-tidy 报告输出文件
+  LINT_CPP_CLANG_TIDY_REPORT_FILE: "clang-tidy-report.txt"
+  # [用户可配] clang-tidy 额外参数
+  LINT_CPP_CLANG_TIDY_EXTRA_ARGS: ""
+
+  # ── cppcheck ──────────────────────────────────────────────────
+  # [用户可配] cppcheck 开关
+  LINT_CPP_CPPCHECK_ENABLE: "false"
+  # [用户可配] cppcheck 检查目录（不指定则扫全仓）
+  LINT_CPP_CPPCHECK_TARGET: "."
+  # [用户可配] cppcheck 项目文件（*.sln / cppcheck project.cppcheck；留空则不用）
+  LINT_CPP_CPPCHECK_PROJECT: ""
+  # [用户可配] cppcheck 检查级别 (--enable=)
+  LINT_CPP_CPPCHECK_ENABLE_LEVEL: "all"
+  # [用户可配] cppcheck 忽略规则（--suppress=）
+  LINT_CPP_CPPCHECK_SUPPRESS: ""
+  # [用户可配] cppcheck 报告输出
+  LINT_CPP_CPPCHECK_REPORT_FILE: "cppcheck-report.xml"
+  # [用户可配] cppcheck 额外参数
+  LINT_CPP_CPPCHECK_EXTRA_ARGS: ""
+
+  # ── clang-format ──────────────────────────────────────────────
+  # [用户可配] clang-format 开关
+  LINT_CPP_CLANG_FORMAT_ENABLE: "false"
+  # [用户可配] 格式化风格：file=读取项目 .clang-format（默认；项目无 .clang-format 时跳过检查）；
+  #            也可显式用 Google / LLVM / Chromium 等内置风格（此时无需 .clang-format）。
+  LINT_CPP_CLANG_FORMAT_STYLE: "file"
+  # [用户可配] 违反格式时是否失败（true → --Werror；false → 仅打印 diff）
+  LINT_CPP_CLANG_FORMAT_STRICT: "true"

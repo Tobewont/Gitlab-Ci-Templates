@@ -1,0 +1,346 @@
+# 原子能力：把各扫描工具的原生输出转成 Sonar externalIssues 通用格式
+# 支持工具类型：pylint / eslint / clangtidy / golangci / cppcheck / phpstan / luacheck / revive / checkstyle / trivy / gitleaks / semgrep
+# 输出统一 JSON, 可由 .sonar-scan 通过 QUALITY_SONAR_EXTERNAL_ISSUES 消费
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/quality/upload-sonar/variables.gitlab-ci.yml'
+
+stages:
+  - quality
+
+.upload-sonar:
+  extends: .base-job
+  image: $QUALITY_UPLOAD_SONAR_IMAGE
+  stage: quality
+  needs:
+    - job: ci-config-guard
+      optional: true
+  variables:
+    STEP_NAME: "Scan → Sonar"
+    STEP_ENABLE: "$QUALITY_UPLOAD_SONAR_ENABLE"
+    GIT_STRATEGY: none        # 仅处理上游 artifact（扫描报告），不需源码，跳过 clone
+  script:
+    - |
+      # QUALITY_UPLOAD_SONAR_* 为空时使用 QUALITY_SCAN_TO_SONAR_*。
+      QUALITY_UPLOAD_SONAR_INPUTS="${QUALITY_UPLOAD_SONAR_INPUTS:-${QUALITY_SCAN_TO_SONAR_INPUTS:-}}"
+      QUALITY_UPLOAD_SONAR_OUTPUT="${QUALITY_UPLOAD_SONAR_OUTPUT:-${QUALITY_SCAN_TO_SONAR_OUTPUT:-sonar-external-issues.json}}"
+      if [ "$STEP_ENABLE" != "true" ]; then STEP_ENABLE="${QUALITY_SCAN_TO_SONAR_ENABLE:-$STEP_ENABLE}"; fi
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（QUALITY_UPLOAD_SONAR_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      # CI 配置保护拦截：guard 失败则跳过（needs 拦不住 when: always 的 job，按状态文件自行判定；文件不存在表示未接入 guard，正常执行）
+      if [ -f .ci-config-guard-result ] && [ "$(cat .ci-config-guard-result 2>/dev/null)" = "blocked" ]; then
+        echo "[skip] CI 配置保护检查未通过（ci-config-guard failed），跳过 $STEP_NAME"; exit 0
+      fi
+      if [ -z "$QUALITY_UPLOAD_SONAR_INPUTS" ]; then
+        echo "[skip] QUALITY_UPLOAD_SONAR_INPUTS 未配置"; exit 0
+      fi
+      command -v python3 >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache python3 py3-pip >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get update -qq && apt-get install -y -qq python3 >/dev/null 2>&1)
+      export QUALITY_UPLOAD_SONAR_INPUTS QUALITY_UPLOAD_SONAR_OUTPUT
+      python3 - <<'PYEOF'
+      import os, re, json, sys
+      inputs = os.environ.get("QUALITY_UPLOAD_SONAR_INPUTS", "").strip()
+      output = os.environ.get("QUALITY_UPLOAD_SONAR_OUTPUT", "sonar-external-issues.json")
+      SEV = {"CRITICAL":"CRITICAL","HIGH":"MAJOR","MEDIUM":"MINOR","LOW":"INFO",
+             "error":"MAJOR","warning":"MINOR","info":"INFO",
+             "E":"MAJOR","W":"MINOR","C":"INFO","R":"MINOR","F":"CRITICAL"}
+      def parse_pylint(path):
+          # pylint 默认 text: path:line:col: CODE: message
+          items = []
+          if not os.path.isfile(path): return items
+          rx = re.compile(r"^(?P<f>[^:]+):(?P<l>\d+):(?P<c>\d+):\s+(?P<code>[A-Z]\d+):\s+(?P<msg>.+?)(?:\s+\((?P<rule>[a-z0-9-]+)\))?\s*$")
+          with open(path, encoding="utf-8", errors="ignore") as f:
+              for line in f:
+                  m = rx.match(line.strip())
+                  if not m: continue
+                  code = m.group("code")
+                  sev = SEV.get(code[0], "MINOR")
+                  items.append({
+                      "engineId":"pylint",
+                      "ruleId": m.group("rule") or code,
+                      "severity": sev,
+                      "type":"CODE_SMELL",
+                      "primaryLocation":{"message": m.group("msg"), "filePath": m.group("f"),
+                                          "textRange":{"startLine": int(m.group("l"))}},
+                  })
+          return items
+      def parse_eslint(path):
+          # eslint 原生 JSON → externalIssues 转换：severity 全档映射 + textRange 补 endLine/column + ruleId 兜底
+          items=[]
+          if not os.path.isfile(path): return items
+          try:
+              with open(path, encoding="utf-8") as f: data = json.load(f)
+          except Exception: return items
+          if not isinstance(data, list): return items
+          ESLINT_SEV = {0: "INFO", 1: "MINOR", 2: "MAJOR"}  # eslint severity 0=off/1=warn/2=error
+          for file_obj in data:
+              fp = file_obj.get("filePath","")
+              for m in file_obj.get("messages",[]):
+                  sev = ESLINT_SEV.get(m.get("severity"), "MINOR")
+                  sl = m.get("line") or 1
+                  el = m.get("endLine") or sl
+                  sc = m.get("column")
+                  ec = m.get("endColumn")
+                  tr = {"startLine": sl, "endLine": el}
+                  # Sonar 拒绝零宽度位置（起点>=终点）：同行且列缺失/相等时不写 column，让 Sonar 用整行
+                  if sc and ec and (el > sl or ec > sc):
+                      tr["startColumn"] = max(sc - 1, 0)
+                      tr["endColumn"] = max(ec - 1, 0)
+                  items.append({
+                      "engineId":"eslint",
+                      "ruleId": m.get("ruleId") or "@typescript-eslint/undefined",
+                      "severity": sev, "type":"CODE_SMELL",
+                      "primaryLocation":{"message": m.get("message",""), "filePath": fp, "textRange": tr},
+                      "effortMinutes": 5,
+                  })
+          return items
+      def parse_trivy(path):
+          items=[]
+          if not os.path.isfile(path): return items
+          try:
+              with open(path, encoding="utf-8") as f: data = json.load(f)
+          except Exception: return items
+          for res in data.get("Results", []) or []:
+              tgt = res.get("Target","")
+              for v in res.get("Vulnerabilities", []) or []:
+                  sev = SEV.get(v.get("Severity","LOW").upper(), "INFO")
+                  items.append({
+                      "engineId":"trivy",
+                      "ruleId": v.get("VulnerabilityID","CVE"),
+                      "severity": sev, "type":"VULNERABILITY",
+                      "primaryLocation":{"message": f"{v.get('PkgName')}@{v.get('InstalledVersion')}: {v.get('Title','')}",
+                                          "filePath": tgt or "image",
+                                          "textRange":{"startLine":1}},
+                  })
+          return items
+      def parse_gitleaks(path):
+          items=[]
+          if not os.path.isfile(path): return items
+          try:
+              with open(path, encoding="utf-8") as f: data = json.load(f)
+          except Exception: return items
+          if not isinstance(data, list): return items
+          for f in data:
+              items.append({
+                  "engineId":"gitleaks",
+                  "ruleId": f.get("RuleID","secret"),
+                  "severity":"CRITICAL", "type":"VULNERABILITY",
+                  "primaryLocation":{"message": f.get("Description","Secret detected"),
+                                      "filePath": f.get("File","."),
+                                      "textRange":{"startLine": f.get("StartLine",1)}},
+              })
+          return items
+      def parse_semgrep(path):
+          items=[]
+          if not os.path.isfile(path): return items
+          try:
+              with open(path, encoding="utf-8") as f: data = json.load(f)
+          except Exception: return items
+          for r in data.get("results",[]):
+              sev_raw = (r.get("extra",{}).get("severity") or "INFO").upper()
+              sev = SEV.get(sev_raw, "INFO")
+              items.append({
+                  "engineId":"semgrep",
+                  "ruleId": r.get("check_id","semgrep"),
+                  "severity": sev, "type":"CODE_SMELL",
+                  "primaryLocation":{"message": r.get("extra",{}).get("message",""),
+                                      "filePath": r.get("path","."),
+                                      "textRange":{"startLine": r.get("start",{}).get("line",1)}},
+              })
+          return items
+      def parse_clangtidy(path):
+          # clang-tidy 原生文本：file:line:col: warning|error|note: message [rule]
+          items = []
+          if not os.path.isfile(path): return items
+          LEVEL = {"error":"MAJOR","warning":"MINOR","note":"INFO"}
+          TYPE_PREFIX = {"readability-":"BUG","bf-":"BUG","clang-diagnostic-":"BUG",
+                         "clang-analyzer-":"BUG","security-":"VULNERABILITY",
+                         "modernize-":"CODE_SMELL","google-":"CODE_SMELL",
+                         "cppcoreguidelines-":"CODE_SMELL","performance-":"CODE_SMELL",
+                         "misc-":"CODE_SMELL"}
+          def issue_type(rule):
+              for pfx, t in TYPE_PREFIX.items():
+                  if rule.startswith(pfx): return t
+              return "CODE_SMELL"
+          rx = re.compile(r"^(?P<f>.+?):(?P<l>\d+):(?P<c>\d+):\s+(?P<lvl>warning|error|note):\s+(?P<msg>.+?)\s+\[(?P<rule>[^\[\]]+)\]\s*$")
+          with open(path, encoding="utf-8", errors="ignore") as fh:
+              for line in fh:
+                  m = rx.match(line.strip())
+                  if not m: continue
+                  rule = m.group("rule")
+                  if rule == "clang-diagnostic-error":
+                      continue
+                  items.append({
+                      "engineId":"Clang-Tidy",
+                      "ruleId": rule or "clang-tidy/undefined",
+                      "severity": LEVEL.get(m.group("lvl"), "MINOR"),
+                      "type": issue_type(rule),
+                      "primaryLocation":{"message": m.group("msg"),
+                                          "filePath": m.group("f"),
+                                          "textRange":{"startLine": int(m.group("l"))}},
+                      "effortMinutes": 5,
+                  })
+          return items
+      def xml_attrs(blob):
+          return dict(re.findall(r'([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*"([^"]*)"', blob or ""))
+      def as_line(value):
+          try:
+              line = int(value or 1)
+          except (TypeError, ValueError):
+              line = 1
+          return line if line > 0 else 1
+      def ext_issue(engine, rule, sev, msg, fp, line):
+          return {
+              "engineId": engine,
+              "ruleId": rule or engine,
+              "severity": sev,
+              "type": "CODE_SMELL",
+              "primaryLocation": {"message": msg or "", "filePath": fp,
+                                  "textRange": {"startLine": as_line(line)}},
+              "effortMinutes": 5,
+          }
+      def load_json(path):
+          if not os.path.isfile(path): return None
+          try:
+              with open(path, encoding="utf-8") as f: return json.load(f)
+          except Exception: return None
+      def parse_golangci(path):
+          # golangci-lint v2 JSON：Issues[].Pos.Filename/Line，FromLinter，Text，Severity
+          data = load_json(path)
+          items = []
+          if not isinstance(data, dict): return items
+          issues = data.get("Issues")
+          if issues is None and isinstance(data.get("Report"), dict):
+              issues = data["Report"].get("Issues")
+          if not isinstance(issues, list): return items
+          GO = {"error": "MAJOR", "warning": "MINOR", "info": "INFO"}
+          for it in issues:
+              if not isinstance(it, dict): continue
+              pos = it.get("Pos") or {}
+              fp = pos.get("Filename") or ""
+              if not fp: continue
+              sev = GO.get((it.get("Severity") or "").lower(), "MAJOR")
+              items.append(ext_issue("golangci-lint", it.get("FromLinter"), sev, it.get("Text"), fp, pos.get("Line")))
+          return items
+      def parse_cppcheck(path):
+          # cppcheck --xml：<error id severity msg> 与可选 <location file line>
+          items = []
+          if not os.path.isfile(path): return items
+          text = open(path, encoding="utf-8", errors="ignore").read()
+          CPP = {"error": "MAJOR", "warning": "MINOR", "style": "MINOR", "performance": "MINOR",
+                 "portability": "MINOR", "information": "INFO"}
+          for m in re.finditer(r"<error\b([^>]*?)(?:/>|>(.*?)</error>)", text, re.S):
+              attrs = xml_attrs(m.group(1))
+              body = m.group(2) or ""
+              loc = {}
+              lm = re.search(r"<location\b([^>]*)/?>", body)
+              if lm: loc = xml_attrs(lm.group(1))
+              fp = loc.get("file") or attrs.get("file") or ""
+              if not fp or fp == "*": continue
+              sev = CPP.get(attrs.get("severity", ""), "MINOR")
+              msg = attrs.get("msg") or attrs.get("verbose") or attrs.get("id") or "cppcheck"
+              items.append(ext_issue("cppcheck", attrs.get("id"), sev, msg, fp, loc.get("line") or attrs.get("line")))
+          return items
+      def parse_phpstan(path):
+          # phpstan --error-format=json：files.<path>.messages[].line/message/identifier
+          data = load_json(path)
+          items = []
+          if not isinstance(data, dict): return items
+          files = data.get("files") or {}
+          if not isinstance(files, dict): return items
+          for fp, body in files.items():
+              if not isinstance(body, dict): continue
+              for msg in body.get("messages") or []:
+                  if not isinstance(msg, dict): continue
+                  items.append(ext_issue("phpstan", msg.get("identifier"), "MAJOR", msg.get("message"), fp, msg.get("line")))
+          return items
+      def parse_luacheck(path):
+          # --formatter sonar 已是 externalIssues；否则按文件分组或 warning 列表转换
+          data = load_json(path)
+          items = []
+          if isinstance(data, dict) and isinstance(data.get("issues"), list):
+              for it in data["issues"]:
+                  if isinstance(it, dict) and isinstance(it.get("primaryLocation"), dict):
+                      it.setdefault("engineId", "luacheck")
+                      it.setdefault("ruleId", "luacheck")
+                      it.setdefault("severity", "MAJOR")
+                      it.setdefault("type", "CODE_SMELL")
+                      items.append(it)
+              if items: return items
+          warnings = []
+          if isinstance(data, dict):
+              for fp, group in data.items():
+                  if not isinstance(group, list): continue
+                  for w in group:
+                      if isinstance(w, dict):
+                          w = dict(w)
+                          w.setdefault("filename", fp)
+                          warnings.append(w)
+          elif isinstance(data, list):
+              warnings = [w for w in data if isinstance(w, dict)]
+          LUA = {"E": "MAJOR", "W": "MINOR", "C": "INFO"}
+          for w in warnings:
+              fp = w.get("filename") or w.get("file") or w.get("filePath") or ""
+              if not fp: continue
+              code = str(w.get("code") or "luacheck")
+              sev = LUA.get(code[:1], "MINOR")
+              msg = w.get("message") or w.get("msg") or code
+              items.append(ext_issue("luacheck", code, sev, msg, fp, w.get("line") or w.get("line_number")))
+          return items
+      def parse_checkstyle(path):
+          # Checkstyle XML：<file name> 下 <error line column severity message source>
+          items = []
+          if not os.path.isfile(path): return items
+          text = open(path, encoding="utf-8", errors="ignore").read()
+          SEV = {"error": "MAJOR", "warning": "MINOR", "info": "INFO"}
+          for fm in re.finditer(r"<file\b([^>]*)>(.*?)</file>", text, re.S):
+              fp = (xml_attrs(fm.group(1)).get("name") or "").replace("\\", "/")
+              if not fp: continue
+              for em in re.finditer(r"<error\b([^>]*)/?>", fm.group(2)):
+                  ea = xml_attrs(em.group(1))
+                  sev_raw = (ea.get("severity") or "error").lower()
+                  if sev_raw == "ignore": continue
+                  source = ea.get("source") or "checkstyle"
+                  rule = source.rsplit(".", 1)[-1] or source
+                  items.append(ext_issue("checkstyle", rule, SEV.get(sev_raw, "MINOR"), ea.get("message"), fp, ea.get("line")))
+          return items
+      def parse_revive(path):
+          # revive -formatter checkstyle：<file name> 下 <error line message severity source>
+          items = []
+          if not os.path.isfile(path): return items
+          text = open(path, encoding="utf-8", errors="ignore").read()
+          REV = {"error": "MAJOR", "warning": "MINOR", "info": "INFO"}
+          for fm in re.finditer(r"<file\b([^>]*)>(.*?)</file>", text, re.S):
+              fp = xml_attrs(fm.group(1)).get("name") or ""
+              if not fp: continue
+              for em in re.finditer(r"<error\b([^>]*)/?>", fm.group(2)):
+                  ea = xml_attrs(em.group(1))
+                  sev = REV.get((ea.get("severity") or "").lower(), "MINOR")
+                  items.append(ext_issue("revive", ea.get("source"), sev, ea.get("message"), fp, ea.get("line")))
+          return items
+      PARSERS = {"pylint":parse_pylint,"eslint":parse_eslint,"trivy":parse_trivy,
+                 "gitleaks":parse_gitleaks,"semgrep":parse_semgrep,"clangtidy":parse_clangtidy,
+                 "golangci":parse_golangci,"golangci-lint":parse_golangci,
+                 "cppcheck":parse_cppcheck,"phpstan":parse_phpstan,
+                 "luacheck":parse_luacheck,"revive":parse_revive,"checkstyle":parse_checkstyle}
+      all_issues = []
+      for entry in [e.strip() for e in inputs.replace('\n', ',').split(',') if e.strip()]:
+          if ':' not in entry: continue
+          tool, path = entry.split(':', 1)
+          tool = tool.strip().lower(); path = path.strip()
+          fn = PARSERS.get(tool)
+          if not fn:
+              print(f"[warn] 未知 tool: {tool}"); continue
+          got = fn(path)
+          print(f"  {tool}: {len(got)} issues (from {path})")
+          all_issues.extend(got)
+      with open(output, "w", encoding="utf-8") as f:
+          json.dump({"issues": all_issues}, f, ensure_ascii=False, indent=2)
+      print(f"共汇总 {len(all_issues)} 个 issue → {output}")
+      PYEOF
+  artifacts:
+    when: always
+    paths:
+      - $QUALITY_UPLOAD_SONAR_OUTPUT
+    expire_in: "7 days"

@@ -1,0 +1,24 @@
+variables:
+  # [用户可配] GitLab Git 制品下载开关与镜像
+  DOWNLOAD_GITLAB_ENABLE: "true"
+  DOWNLOAD_GITLAB_IMAGE: "$CI_BASE_IMAGE"
+  # [用户可配] file / directory
+  DOWNLOAD_GITLAB_TYPE: "file"
+  # [用户可配] HTTPS 仓库地址、分支、认证信息
+  DOWNLOAD_GITLAB_REPO_URL: ""
+  DOWNLOAD_GITLAB_BRANCH: ""
+  # 用户名默认取全局 GITLAB_USERNAME（base 层，默认 oauth2）；需单独指定时在此覆盖
+  DOWNLOAD_GITLAB_USERNAME: "$GITLAB_USERNAME"
+  DOWNLOAD_GITLAB_TOKEN: ""
+  # [用户可配] file: 逗号分隔相对路径；directory: 单个相对目录
+  DOWNLOAD_GITLAB_PATHS: ""
+  # [用户可配] 输出目录（必须是 CI_PROJECT_DIR 下相对路径）
+  DOWNLOAD_GITLAB_DEST_DIR: ".downloads/gitlab"
+  # [用户可配] 数量/单文件/总大小上限。
+  #   空文件（如 .gitkeep 占位）跳过且不计入 manifest 与 DOWNLOAD_FILE_COUNT。
+  DOWNLOAD_GITLAB_MAX_FILES: "1000"
+  DOWNLOAD_GITLAB_MAX_FILE_BYTES: "1073741824"
+  DOWNLOAD_GITLAB_MAX_TOTAL_BYTES: "2147483648"
+  # [内部] 输出文件
+  DOWNLOAD_GITLAB_DOTENV_FILE: "download-gitlab.env"
+  DOWNLOAD_GITLAB_MANIFEST_FILE: "download-gitlab.json"

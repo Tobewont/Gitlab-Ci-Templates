@@ -1,0 +1,71 @@
+# 原子能力：Python 静态检查（Pylint）
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/git/variables.gitlab-ci.yml'
+  - local: '/git/jobs.gitlab-ci.yml'
+  - local: '/lint/python/variables.gitlab-ci.yml'
+
+stages:
+  - lint
+
+# ── 原子能力：Pylint ───────────────────────────────────────────────
+# 组装 = 取变更文件 + 禁用则跳过 + 过滤 .py + pylint 命令。
+.pylint:
+  extends: .base-job
+  image: $LINT_PY_IMAGE
+  stage: lint
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "pylint"
+    STEP_ENABLE: "$LINT_PY_PYLINT_ENABLE"
+    STEP_FILE_GLOB: '\.py$'
+  before_script:
+    - export LC_ALL="$CI_LOCALE"; export LANG="$CI_LOCALE"
+    - !reference [.get-changed-files, before_script]
+    - |
+      # PIP 镜像:
+      #   1. PIP_INDEX_URL 显式设置 → 用它
+      #   2. USE_CHINA_MIRROR=true (默认) → 用阿里云
+      #   3. USE_CHINA_MIRROR=false → 不改 (用容器默认 pip.conf)
+      if [ -n "$PIP_INDEX_URL" ]; then
+        pip config set global.index-url "$PIP_INDEX_URL" >/dev/null 2>&1 || true
+      elif [ "${USE_CHINA_MIRROR:-true}" = "true" ]; then
+        pip config set global.index-url "https://mirrors.aliyun.com/pypi/simple/" >/dev/null 2>&1 || true
+      fi
+    - pip install pylint --quiet
+    # 附加 pip 依赖（如 rcfile 声明的 pylint 插件，空格分隔，留空跳过）
+    - |
+      [ -n "$LINT_PY_PYLINT_EXTRA_DEPS" ] && pip install $LINT_PY_PYLINT_EXTRA_DEPS --quiet || true
+    - |
+      [ -f "requirements.txt" ] && pip install -r requirements.txt --quiet || true
+  script:
+    - !reference [.skip-if-disabled, script]
+    - !reference [.filter-changed-files, script]
+    - |
+      PYLINT_ARGS=""
+      [ -n "$LINT_PY_PYLINT_CONFIG" ] && [ -f "$LINT_PY_PYLINT_CONFIG" ] && PYLINT_ARGS="--rcfile=$LINT_PY_PYLINT_CONFIG"
+      echo "待扫描文件：$STEP_MATCHED_FILES"
+      # ── 可选：产出 Pylint 原生文本报告（供 .upload-sonar 的 parse_pylint 转 Sonar externalIssues 消费）──
+      if [ "$LINT_PY_PYLINT_SONAR_REPORT" = "true" ]; then
+        echo "==> 生成 Pylint 原生报告：$LINT_PY_PYLINT_SONAR_REPORT_PATH（供 .upload-sonar 消费）"
+        mkdir -p "$(dirname "$LINT_PY_PYLINT_SONAR_REPORT_PATH")"
+        pylint $PYLINT_ARGS $STEP_MATCHED_FILES 2>&1 | tee "$LINT_PY_PYLINT_SONAR_REPORT_PATH"
+        RC=${PIPESTATUS[0]}
+        # 兜底：tee 异常未建文件时补空报告，保证 artifacts 始终可上传
+        [ -f "$LINT_PY_PYLINT_SONAR_REPORT_PATH" ] || : > "$LINT_PY_PYLINT_SONAR_REPORT_PATH"
+        # 退出码取 pylint 原始状态，流水线影响由 allow_failure 控制
+        exit $RC
+      fi
+      # 未开启报告：pylint 结果直接打日志，流水线影响同样由 allow_failure 控制
+      pylint $PYLINT_ARGS $STEP_MATCHED_FILES
+  artifacts:
+    when: always
+    paths:
+      - "$LINT_PY_PYLINT_SONAR_REPORT_PATH"
+    expire_in: "1 day"

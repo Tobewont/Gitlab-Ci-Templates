@@ -1,0 +1,10 @@
+# SonarQube 代码质量能力（聚合入口）
+# 各能力已按独立子目录拆分（与 quality/upload-sonar 组织方式一致）：
+#   sonar-scan       .sonar-scan（代码质量扫描）
+#   sonar-provision  .sonar-project-provision（首次扫描前项目治理）
+#   sonar-gate       .sonar-quality-gate（质量阈门禁）
+# 共享配置（实例/Token/项目 Key/REPORT_TASK）在 quality/sonar/variables.gitlab-ci.yml（本文件已包含）。
+include:
+  - local: '/quality/sonar-scan/jobs.gitlab-ci.yml'
+  - local: '/quality/sonar-provision/jobs.gitlab-ci.yml'
+  - local: '/quality/sonar-gate/jobs.gitlab-ci.yml'

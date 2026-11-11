@@ -1,0 +1,49 @@
+# 原子能力：PHP 静态检查（PHPStan）
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/git/variables.gitlab-ci.yml'
+  - local: '/git/jobs.gitlab-ci.yml'
+  - local: '/lint/php/variables.gitlab-ci.yml'
+
+stages:
+  - lint
+
+.phpstan:
+  extends: .base-job
+  image: $LINT_PHP_IMAGE
+  stage: lint
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "PHPStan"
+    STEP_ENABLE: "$LINT_PHP_PHPSTAN_ENABLE"
+    STEP_FILE_GLOB: "\\.php$"
+  before_script:
+    - export LC_ALL="$CI_LOCALE"; export LANG="$CI_LOCALE"
+    - !reference [.get-changed-files, before_script]
+  script:
+    - !reference [.skip-if-disabled, script]
+    - !reference [.filter-changed-files, script]
+    - |
+      CFG_ARG=""
+      if [ -n "$LINT_PHP_PHPSTAN_CONFIG" ] && [ -f "$LINT_PHP_PHPSTAN_CONFIG" ]; then
+        CFG_ARG="-c $LINT_PHP_PHPSTAN_CONFIG"
+      fi
+      mkdir -p reports
+      echo "待扫描文件：" && echo "$STEP_MATCHED_FILES"
+      echo "$STEP_MATCHED_FILES" | xargs phpstan analyse \
+        $CFG_ARG \
+        --level="$LINT_PHP_PHPSTAN_LEVEL" \
+        --no-progress \
+        --error-format=json > reports/phpstan.json || true
+      cat reports/phpstan.json 2>/dev/null || true
+  artifacts:
+    when: always
+    paths:
+      - reports/phpstan.json
+    expire_in: "7 days"

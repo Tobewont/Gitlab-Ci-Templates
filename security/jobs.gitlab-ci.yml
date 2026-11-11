@@ -1,0 +1,8 @@
+# 安全扫描原子能力（聚合入口）
+# 各扫描器已按独立子目录拆分；业务侧可只 include 需要的扫描器：
+#   trivy / gitleaks / semgrep / checkmarx / jfrog-xray
+include:
+  - local: '/security/trivy/jobs.gitlab-ci.yml'
+  - local: '/security/gitleaks/jobs.gitlab-ci.yml'
+  - local: '/security/semgrep/jobs.gitlab-ci.yml'
+  - local: '/security/checkmarx/jobs.gitlab-ci.yml'

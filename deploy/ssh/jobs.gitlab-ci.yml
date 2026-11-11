@@ -1,0 +1,92 @@
+# 原子能力：SSH 部署（key 私钥认证 / password 密码认证）
+# 可选先 scp 上传制品到远程主机，再执行远程命令；支持多台主机顺序执行
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/deploy/ssh/variables.gitlab-ci.yml'
+
+stages:
+  - deploy
+
+.deploy-ssh:
+  extends: .base-job
+  image: $DEPLOY_SSH_IMAGE
+  stage: deploy
+  variables:
+    STEP_NAME: "SSH Deploy"
+    STEP_ENABLE: "$DEPLOY_SSH_ENABLE"
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（DEPLOY_SSH_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      if [ -z "$DEPLOY_SSH_HOSTS" ] || [ -z "$DEPLOY_SSH_USERNAME" ]; then
+        echo "[skip] DEPLOY_SSH_HOSTS / USER 未配置"; exit 0
+      fi
+      if [ -z "$DEPLOY_SSH_COMMAND" ] && [ -z "$DEPLOY_SSH_UPLOAD_LOCAL" ]; then
+        echo "[skip] 既未配置 DEPLOY_SSH_COMMAND，也未配置 DEPLOY_SSH_UPLOAD_LOCAL"; exit 0
+      fi
+
+      MODE="${DEPLOY_SSH_AUTH_MODE:-key}"
+
+      # known_hosts
+      mkdir -p ~/.ssh && chmod 700 ~/.ssh
+      if [ -n "$DEPLOY_SSH_KNOWN_HOSTS" ]; then
+        printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+        STRICT="StrictHostKeyChecking=yes"
+      else
+        STRICT="StrictHostKeyChecking=no"
+      fi
+
+      # 按模式准备认证
+      case "$MODE" in
+        key)
+          if [ -z "$DEPLOY_SSH_PRIVATE_KEY" ]; then
+            echo "[skip] AUTH_MODE=key 需要 DEPLOY_SSH_PRIVATE_KEY"; exit 0
+          fi
+          if [ -f "$DEPLOY_SSH_PRIVATE_KEY" ]; then
+            cp "$DEPLOY_SSH_PRIVATE_KEY" ~/.ssh/id_rsa
+          else
+            printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          fi
+          chmod 600 ~/.ssh/id_rsa
+          SSH="ssh"
+          SCP="scp"
+          ;;
+        password)
+          if [ -z "$DEPLOY_SSH_PASSWORD" ]; then
+            echo "[skip] AUTH_MODE=password 需要 DEPLOY_SSH_PASSWORD"; exit 0
+          fi
+          command -v sshpass >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache sshpass >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq sshpass >/dev/null 2>&1)
+          SSH='sshpass -e ssh'
+          SCP='sshpass -e scp'
+          export SSHPASS="$DEPLOY_SSH_PASSWORD"
+          ;;
+        *)
+          echo "错误：DEPLOY_SSH_AUTH_MODE 只支持 key / password（当前：$MODE）"; exit 1
+          ;;
+      esac
+
+      SSH_OPTS="-o $STRICT -o UserKnownHostsFile=~/.ssh/known_hosts -o ConnectTimeout=30 -p $DEPLOY_SSH_PORT"
+      SCP_OPTS="-o $STRICT -o UserKnownHostsFile=~/.ssh/known_hosts -o ConnectTimeout=30 -P $DEPLOY_SSH_PORT"
+
+      IFS=,
+      for HOST in $DEPLOY_SSH_HOSTS; do
+        HOST=$(echo "$HOST" | tr -d ' ')
+        [ -z "$HOST" ] && continue
+        echo "==================== $DEPLOY_SSH_USERNAME@$HOST (auth=$MODE) ===================="
+
+        if [ -n "$DEPLOY_SSH_UPLOAD_LOCAL" ]; then
+          if [ ! -e "$DEPLOY_SSH_UPLOAD_LOCAL" ]; then
+            echo "错误：本地路径 $DEPLOY_SSH_UPLOAD_LOCAL 不存在"; exit 1
+          fi
+          echo "==> scp $DEPLOY_SSH_UPLOAD_LOCAL → $HOST:$DEPLOY_SSH_UPLOAD_REMOTE"
+          $SCP $SCP_OPTS -r "$DEPLOY_SSH_UPLOAD_LOCAL" "$DEPLOY_SSH_USERNAME@$HOST:$DEPLOY_SSH_UPLOAD_REMOTE"
+        fi
+
+        if [ -n "$DEPLOY_SSH_COMMAND" ]; then
+          echo "==> ssh $HOST $DEPLOY_SSH_COMMAND"
+          $SSH $SSH_OPTS "$DEPLOY_SSH_USERNAME@$HOST" "$DEPLOY_SSH_COMMAND"
+        fi
+      done
+      echo "SSH 部署完成（认证方式：$MODE）"

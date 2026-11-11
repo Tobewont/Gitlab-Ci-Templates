@@ -1,0 +1,62 @@
+# 原子能力：版本号生成与 commit 关键字扫描
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/git/version/variables.gitlab-ci.yml'
+
+# 生成应用版本号（默认 git describe --long --tags --always）
+# 导出：CI_APP_VERSION（后续 job 可通过 dotenv artifact 消费；如仅在同一 job 内用，直接引用即可）
+# 依赖变量：GIT_VERSION_STRATEGY（可选：git-describe / commit-sha / tag-or-sha；默认 git-describe）
+#           GIT_VERSION_DESCRIBE_ARGS（可选：git describe 附加参数，默认 --long --tags --always）
+.git-describe:
+  script:
+    - |
+      STRAT="${GIT_VERSION_STRATEGY:-git-describe}"
+      case "$STRAT" in
+        commit-sha)
+          CI_APP_VERSION="$CI_COMMIT_SHORT_SHA"
+          ;;
+        tag-or-sha)
+          if [ -n "$CI_COMMIT_TAG" ]; then
+            CI_APP_VERSION="$CI_COMMIT_TAG"
+          else
+            CI_APP_VERSION="$CI_COMMIT_SHORT_SHA"
+          fi
+          ;;
+        *)
+          ARGS="${GIT_VERSION_DESCRIBE_ARGS:---long --tags --always}"
+          CI_APP_VERSION=$(git describe $ARGS 2>/dev/null || echo "$CI_COMMIT_SHORT_SHA")
+          ;;
+      esac
+      export CI_APP_VERSION
+      echo "应用版本：$CI_APP_VERSION"
+      echo "CI_APP_VERSION=$CI_APP_VERSION" >> app_version.env
+  artifacts:
+    reports:
+      dotenv: app_version.env
+# 扫描本次 push 的所有 commit message，返回首个包含关键字的完整消息
+# 依赖变量：COMMIT_KEYWORD（必填，如 "smoke" / "build" / "release"）
+#           COMMIT_KEYWORD_CASE_SENSITIVE（默认 false，大小写不敏感）
+# 导出：CI_MATCHED_COMMIT_MESSAGE（若命中；未命中则为空）
+.get-commit-keyword:
+  script:
+    - |
+      if [ -z "$COMMIT_KEYWORD" ]; then
+        echo "[skip] .get-commit-keyword: COMMIT_KEYWORD 未配置"; exit 0
+      fi
+      CASE_INSENSITIVE=""
+      [ "${COMMIT_KEYWORD_CASE_SENSITIVE:-false}" != "true" ] && CASE_INSENSITIVE="-i"
+      RANGE="${CI_COMMIT_BEFORE_SHA:-HEAD~1}..$CI_COMMIT_SHA"
+      # 首推分支/浅克隆下 before_sha 不可达 → 只看当前 commit
+      if ! git cat-file -e "${CI_COMMIT_BEFORE_SHA:-}^{commit}" 2>/dev/null; then
+        RANGE="$CI_COMMIT_SHA -n 1"
+      fi
+      MSG=$(git log --format=%B $RANGE 2>/dev/null | grep $CASE_INSENSITIVE -m1 "$COMMIT_KEYWORD" || true)
+      CI_MATCHED_COMMIT_MESSAGE="$MSG"
+      export CI_MATCHED_COMMIT_MESSAGE
+      echo "关键字：$COMMIT_KEYWORD"
+      echo "命中消息：${CI_MATCHED_COMMIT_MESSAGE:-<无>}"
+      echo "CI_MATCHED_COMMIT_MESSAGE=$CI_MATCHED_COMMIT_MESSAGE" >> commit_keyword.env
+  artifacts:
+    reports:
+      dotenv: commit_keyword.env

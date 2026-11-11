@@ -1,0 +1,219 @@
+# 通用底座能力（跨功能复用，无 Git 语义）
+# 通过 extends 或 !reference 组装：
+#   .skip-if-disabled     STEP_ENABLE != true 时跳过
+#   .http-download        通用 HTTP GET 下载
+#   .http-upload          通用 HTTP 上传（form / put）
+#   .http-request         通用 GET/POST/PUT/DELETE
+#   .svn-checkout         SVN 拉代码
+#   .maven-settings-setup 生成 ~/.m2/settings.xml
+# Git / GitLab 相关能力见 /git/jobs.gitlab-ci.yml
+
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+
+# ── 开关：STEP_ENABLE != true 时跳过（片段）────────────────────────
+# 复用：- !reference [.skip-if-disabled, script]
+.skip-if-disabled:
+  script:
+    - |
+      if [ "${STEP_ENABLE:-true}" != "true" ]; then
+        echo "[skip] ${STEP_NAME:-该能力} 未启用（STEP_ENABLE=${STEP_ENABLE}）"
+        [ -n "$STEP_ARTIFACT" ] && echo '[]' > "$STEP_ARTIFACT"
+        exit 0
+      fi
+# ── 换国内镜像源（apk/apt 加速；片段）────────────────────────────
+# 在 apk add / apt-get install 前 !reference 复用，把 alpine/debian/ubuntu 源换成国内
+# 复用：- !reference [.setup-pkg-mirror, script]
+.setup-pkg-mirror:
+  script:
+    - |
+      # Alpine apk 源
+      if [ -f /etc/apk/repositories ]; then
+        sed -i "s#dl-cdn.alpinelinux.org#${PKG_ALPINE_MIRROR:-mirrors.aliyun.com}#g" /etc/apk/repositories 2>/dev/null || true
+      fi
+      # Debian/Ubuntu apt 源（buster EOL 用 archive，其余换国内 mirror）
+      if [ -f /etc/apt/sources.list ]; then
+        if grep -q "buster" /etc/apt/sources.list 2>/dev/null; then
+          printf 'deb http://archive.debian.org/debian buster main non-free contrib\ndeb http://archive.debian.org/debian-security buster/updates main\n' > /etc/apt/sources.list
+          echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check 2>/dev/null || true
+        else
+          M="${PKG_APT_MIRROR:-mirrors.aliyun.com}"
+          sed -i "s#deb.debian.org#$M#g; s#security.debian.org#$M#g; s#archive.ubuntu.com#$M#g; s#security.ubuntu.com#$M#g" /etc/apt/sources.list 2>/dev/null || true
+        fi
+      fi
+# 通用 HTTP 下载（GET）
+# 依赖变量：HTTP_DOWNLOAD_URL / HTTP_DOWNLOAD_DEST（可选 HTTP_DOWNLOAD_HEADER）
+# 用法：extends: .http-download 或 !reference [.http-download, script]
+.http-download:
+  script:
+    - |
+      if [ -z "$HTTP_DOWNLOAD_URL" ] || [ -z "$HTTP_DOWNLOAD_DEST" ]; then
+        echo "[skip] .http-download: HTTP_DOWNLOAD_URL / HTTP_DOWNLOAD_DEST 未配置"; exit 0
+      fi
+      command -v curl >/dev/null 2>&1 || { sed -i "s#dl-cdn.alpinelinux.org#${PKG_ALPINE_MIRROR:-mirrors.aliyun.com}#g" /etc/apk/repositories 2>/dev/null; command -v apk >/dev/null 2>&1 && apk add --no-cache curl >/dev/null 2>&1; } || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq curl >/dev/null 2>&1)
+      HDR=""
+      [ -n "$HTTP_DOWNLOAD_HEADER" ] && HDR="-H \"$HTTP_DOWNLOAD_HEADER\""
+      echo "下载 $HTTP_DOWNLOAD_URL → $HTTP_DOWNLOAD_DEST"
+      eval "curl -fsSL --retry 3 --connect-timeout 30 --max-time 600 -o \"$HTTP_DOWNLOAD_DEST\" $HDR \"$HTTP_DOWNLOAD_URL\""
+      ls -l "$HTTP_DOWNLOAD_DEST"
+# 通用 HTTP 上传（POST 表单 或 PUT 原始文件）
+# 依赖变量：HTTP_UPLOAD_URL / HTTP_UPLOAD_LOCAL_PATH
+#   HTTP_UPLOAD_METHOD    "form" (curl -F, 默认) 或 "put" (curl --upload-file)
+#   HTTP_UPLOAD_FIELD     form 模式下的表单字段名，默认 "file"
+#   HTTP_UPLOAD_EXTRA_FIELDS   form 模式下的额外字段，形如 "k1=v1&k2=v2"
+#   HTTP_UPLOAD_HEADER    可选，形如 "Authorization: Bearer xxx"（多头请多次 -H 需业务侧覆盖 script）
+.http-upload:
+  script:
+    - |
+      if [ -z "$HTTP_UPLOAD_URL" ] || [ -z "$HTTP_UPLOAD_LOCAL_PATH" ]; then
+        echo "[skip] .http-upload: HTTP_UPLOAD_URL / HTTP_UPLOAD_LOCAL_PATH 未配置"; exit 0
+      fi
+      if [ ! -f "$HTTP_UPLOAD_LOCAL_PATH" ]; then
+        echo "错误：$HTTP_UPLOAD_LOCAL_PATH 不存在"; exit 1
+      fi
+      command -v curl >/dev/null 2>&1 || { sed -i "s#dl-cdn.alpinelinux.org#${PKG_ALPINE_MIRROR:-mirrors.aliyun.com}#g" /etc/apk/repositories 2>/dev/null; command -v apk >/dev/null 2>&1 && apk add --no-cache curl >/dev/null 2>&1; } || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq curl >/dev/null 2>&1)
+      METHOD="${HTTP_UPLOAD_METHOD:-form}"
+      HDR=""
+      [ -n "$HTTP_UPLOAD_HEADER" ] && HDR="-H \"$HTTP_UPLOAD_HEADER\""
+      echo "上传 $HTTP_UPLOAD_LOCAL_PATH → $HTTP_UPLOAD_URL (mode=$METHOD)"
+      if [ "$METHOD" = "put" ]; then
+        eval "curl -fsSL --retry 3 --max-time 600 -X PUT --upload-file \"$HTTP_UPLOAD_LOCAL_PATH\" $HDR \"$HTTP_UPLOAD_URL\""
+      else
+        FIELD="${HTTP_UPLOAD_FIELD:-file}"
+        EXTRA=""
+        if [ -n "$HTTP_UPLOAD_EXTRA_FIELDS" ]; then
+          OLDIFS="$IFS"; IFS='&'
+          for kv in $HTTP_UPLOAD_EXTRA_FIELDS; do
+            [ -z "$kv" ] && continue
+            EXTRA="$EXTRA -F \"$kv\""
+          done
+          IFS="$OLDIFS"
+        fi
+        eval "curl -fsSL --retry 3 --max-time 600 -F \"${FIELD}=@${HTTP_UPLOAD_LOCAL_PATH}\" $EXTRA $HDR \"$HTTP_UPLOAD_URL\""
+      fi
+      echo ""
+      echo "上传完成"
+# SVN 拉代码到 SVN_LOCAL_DIR
+# 依赖变量：SVN_REPO_URL / SVN_USERNAME / SVN_PASSWORD / SVN_LOCAL_DIR
+.svn-checkout:
+  script:
+    - |
+      if [ -z "$SVN_REPO_URL" ] || [ -z "$SVN_LOCAL_DIR" ]; then
+        echo "[skip] .svn-checkout: SVN_REPO_URL / SVN_LOCAL_DIR 未配置"; exit 0
+      fi
+      command -v svn >/dev/null 2>&1 || { sed -i "s#dl-cdn.alpinelinux.org#${PKG_ALPINE_MIRROR:-mirrors.aliyun.com}#g" /etc/apk/repositories 2>/dev/null; command -v apk >/dev/null 2>&1 && apk add --no-cache subversion >/dev/null 2>&1; } || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq subversion >/dev/null 2>&1)
+      AUTH=""
+      [ -n "$SVN_USERNAME" ] && AUTH="--username $SVN_USERNAME"
+      [ -n "$SVN_PASSWORD" ] && AUTH="$AUTH --password $SVN_PASSWORD"
+      echo "svn checkout $SVN_REPO_URL → $SVN_LOCAL_DIR"
+      svn checkout "$SVN_REPO_URL" "$SVN_LOCAL_DIR" $AUTH \
+        --non-interactive --trust-server-cert \
+        --trust-server-cert-failures "unknown-ca,cn-mismatch,expired,not-yet-valid,other"
+# 通用 HTTP 请求（GET / POST / PUT / DELETE，用于触发平台 webhook / 调用 REST API）
+# 依赖变量：HTTP_REQUEST_URL / HTTP_REQUEST_METHOD（默认 GET）
+#   可选：HTTP_REQUEST_BODY / HTTP_REQUEST_CONTENT_TYPE（默认 application/json）
+#         HTTP_REQUEST_HEADER（单条，格式 "Key: Value"）
+#         HTTP_REQUEST_EXPECT_CODE（期望 HTTP 码，默认 200）
+.http-request:
+  script:
+    - |
+      if [ -z "$HTTP_REQUEST_URL" ]; then
+        echo "[skip] .http-request: HTTP_REQUEST_URL 未配置"; exit 0
+      fi
+      command -v curl >/dev/null 2>&1 || { sed -i "s#dl-cdn.alpinelinux.org#${PKG_ALPINE_MIRROR:-mirrors.aliyun.com}#g" /etc/apk/repositories 2>/dev/null; command -v apk >/dev/null 2>&1 && apk add --no-cache curl >/dev/null 2>&1; } || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq curl >/dev/null 2>&1)
+      METHOD="${HTTP_REQUEST_METHOD:-GET}"
+      CT="${HTTP_REQUEST_CONTENT_TYPE:-application/json}"
+      EXPECT="${HTTP_REQUEST_EXPECT_CODE:-200}"
+      HDR=""
+      [ -n "$HTTP_REQUEST_HEADER" ] && HDR="-H \"$HTTP_REQUEST_HEADER\""
+      BODY_ARG=""
+      [ -n "$HTTP_REQUEST_BODY" ] && BODY_ARG="-H \"Content-Type: $CT\" -d \"$HTTP_REQUEST_BODY\""
+      echo "==> $METHOD $HTTP_REQUEST_URL"
+      RESP=$(eval "curl -sS --max-time 120 -w '\nHTTP_CODE=%{http_code}' -X $METHOD $HDR $BODY_ARG \"$HTTP_REQUEST_URL\"")
+      echo "$RESP"
+      CODE=$(printf '%s' "$RESP" | grep '^HTTP_CODE=' | cut -d= -f2)
+      if [ "$CODE" != "$EXPECT" ]; then
+        echo "HTTP $CODE，期望 $EXPECT"; exit 1
+      fi
+# 生成 ~/.m2/settings.xml（内网 Nexus mirror + 私服凭据）
+# 依赖变量：MAVEN_MIRROR_URL / MAVEN_MIRROR_ID / MAVEN_MIRROR_OF
+#   MAVEN_SERVERS: "id1=user1:pass1&id2=user2:pass2"（可选，多组私服凭据）
+.maven-settings-setup:
+  script:
+    - |
+      if [ -z "$MAVEN_MIRROR_URL" ] && [ -z "$MAVEN_SERVERS" ]; then
+        echo "[skip] .maven-settings-setup: MAVEN_MIRROR_URL / MAVEN_SERVERS 均未配置"; exit 0
+      fi
+      mkdir -p ~/.m2
+      SERVERS=""
+      if [ -n "$MAVEN_SERVERS" ]; then
+        OLDIFS="$IFS"; IFS='&'
+        for entry in $MAVEN_SERVERS; do
+          [ -z "$entry" ] && continue
+          ID=$(printf '%s' "$entry" | cut -d= -f1 | tr -d ' ')
+          UP=$(printf '%s' "$entry" | cut -d= -f2)
+          USR=$(printf '%s' "$UP" | cut -d: -f1)
+          PW=$(printf '%s'  "$UP" | cut -d: -f2-)
+          SERVERS="${SERVERS}<server><id>${ID}</id><username>${USR}</username><password>${PW}</password></server>"
+        done
+        IFS="$OLDIFS"
+      fi
+      MIRRORS=""
+      if [ -n "$MAVEN_MIRROR_URL" ]; then
+        MID="${MAVEN_MIRROR_ID:-internal-mirror}"
+        MOF="${MAVEN_MIRROR_OF:-*}"
+        MIRRORS="<mirror><id>${MID}</id><mirrorOf>${MOF}</mirrorOf><url>${MAVEN_MIRROR_URL}</url></mirror>"
+      fi
+      printf '<?xml version="1.0" encoding="UTF-8"?>\n<settings>\n  <servers>%s</servers>\n  <mirrors>%s</mirrors>\n</settings>\n' "$SERVERS" "$MIRRORS" > ~/.m2/settings.xml
+      echo "已生成 ~/.m2/settings.xml"
+      cat ~/.m2/settings.xml
+
+# ── 原子能力：build-filter ───────────────────────────────────────
+# 按 commit message 关键字判定是否需要构建, 导出 NEED_BUILD 到 dotenv
+# 支持手动触发 (BUILD_FILTER_MANUAL_TRIGGER=true 且 CI_PIPELINE_SOURCE=web)
+# 用法:
+#   my-filter:
+#     extends: .build-filter
+#   my-build:
+#     needs: [my-filter]
+#     rules:
+#       - if: '$NEED_BUILD == "true"'
+.build-filter:
+  extends: .base-job
+  variables:
+    STEP_NAME: "Build Filter"
+  script:
+    - |
+      NEED_BUILD="false"
+      REASON=""
+      # 1) 手动触发
+      if [ "$BUILD_FILTER_MANUAL_TRIGGER" = "true" ] && [ "$CI_PIPELINE_SOURCE" = "web" ]; then
+        NEED_BUILD="true"; REASON="manual trigger (web)"
+      fi
+      # 2) MR / Tag 事件默认要构建
+      if [ -n "$CI_MERGE_REQUEST_IID" ]; then NEED_BUILD="true"; REASON="MR event"; fi
+      if [ -n "$CI_COMMIT_TAG" ]; then NEED_BUILD="true"; REASON="tag push: $CI_COMMIT_TAG"; fi
+      # 3) commit message 含任一关键字
+      if [ "$NEED_BUILD" != "true" ] && [ -n "$CI_COMMIT_MESSAGE" ]; then
+        KEYWORDS="${BUILD_FILTER_KEYWORDS:-build,smoke,release}"
+        for kw in $(printf '%s' "$KEYWORDS" | tr ',' ' '); do
+          kw=$(echo "$kw" | tr -d '[:space:]')
+          [ -z "$kw" ] && continue
+          if printf '%s' "$CI_COMMIT_MESSAGE" | grep -iq "$kw"; then
+            NEED_BUILD="true"; REASON="commit message contains '$kw'"; break
+          fi
+        done
+      fi
+      echo "==================== Build Filter ===================="
+      echo "触发源: $CI_PIPELINE_SOURCE"
+      echo "commit: $CI_COMMIT_SHORT_SHA $(printf '%s' "$CI_COMMIT_MESSAGE" | head -1)"
+      echo "NEED_BUILD=$NEED_BUILD"
+      echo "原因: $REASON"
+      echo "======================================================"
+      echo "NEED_BUILD=$NEED_BUILD" > build-filter.env
+      echo "BUILD_FILTER_REASON=$REASON" >> build-filter.env
+  artifacts:
+    reports:
+      dotenv: build-filter.env

@@ -1,0 +1,55 @@
+# 原子能力：GitOps 部署（改 K8s 声明式仓库的镜像 tag → 由 Argo CD / Flux 自动拉起）
+# 多目标（多 yaml / 多镜像）：业务侧用 parallel: matrix 复用本能力
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/deploy/gitops/variables.gitlab-ci.yml'
+
+stages:
+  - deploy
+
+.deploy-gitops:
+  extends: .base-job
+  image: $DEPLOY_GITOPS_IMAGE
+  stage: deploy
+  variables:
+    STEP_NAME: "GitOps Deploy"
+    STEP_ENABLE: "$DEPLOY_GITOPS_ENABLE"
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（DEPLOY_GITOPS_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      if [ -z "$DEPLOY_GITOPS_REPO_URL" ] || [ -z "$DEPLOY_GITOPS_TOKEN" ] || [ -z "$DEPLOY_GITOPS_YAML_FILE" ] || [ -z "$DEPLOY_GITOPS_NEW_IMAGE" ]; then
+        echo "[skip] REPO_URL / TOKEN / YAML_FILE / NEW_IMAGE 未配置"; exit 0
+      fi
+      # 安装依赖
+      command -v git >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache git curl >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq git curl >/dev/null 2>&1)
+      if ! command -v yq >/dev/null 2>&1; then
+        curl -fsSL -o /usr/local/bin/yq "https://mirror.ghproxy.com/https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64" || \
+        curl -fsSL -o /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64"
+        chmod +x /usr/local/bin/yq
+      fi
+
+      AUTH_URL=$(echo "$DEPLOY_GITOPS_REPO_URL" | sed "s|://|://${DEPLOY_GITOPS_USERNAME}:${DEPLOY_GITOPS_TOKEN}@|")
+      WORK=$(mktemp -d)
+      git clone -b "$DEPLOY_GITOPS_BRANCH" "$AUTH_URL" "$WORK/repo"
+      cd "$WORK/repo"
+      git config user.name  "$DEPLOY_GITOPS_AUTHOR_NAME"
+      git config user.email "$DEPLOY_GITOPS_AUTHOR_EMAIL"
+
+      OLD=$(yq eval "$DEPLOY_GITOPS_IMAGE_FIELD" "$DEPLOY_GITOPS_YAML_FILE")
+      echo "旧镜像：$OLD"
+      echo "新镜像：$DEPLOY_GITOPS_NEW_IMAGE"
+      if [ "$OLD" = "$DEPLOY_GITOPS_NEW_IMAGE" ]; then
+        echo "镜像未变化，跳过提交"; exit 0
+      fi
+      yq eval "${DEPLOY_GITOPS_IMAGE_FIELD} = \"${DEPLOY_GITOPS_NEW_IMAGE}\"" -i "$DEPLOY_GITOPS_YAML_FILE"
+
+      git add "$DEPLOY_GITOPS_YAML_FILE"
+      if git diff --cached --quiet; then
+        echo "yaml 无实质变更，跳过提交"; exit 0
+      fi
+      git commit -m "$DEPLOY_GITOPS_COMMIT_MESSAGE"
+      git push origin "$DEPLOY_GITOPS_BRANCH"
+      echo "已推送 GitOps 变更；Argo CD / Flux 会自动拉起"

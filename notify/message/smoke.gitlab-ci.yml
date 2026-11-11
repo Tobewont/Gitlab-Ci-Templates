@@ -1,0 +1,7 @@
+# 场景文案：冒烟测试
+.notify-msg-smoke:
+  script:
+    - |
+      if [ "${NOTIFY_SCENARIO:-pipeline}" = "smoke" ]; then
+        _SCN="冒烟测试"; _EXTRA=""; export _SCN _EXTRA
+      fi

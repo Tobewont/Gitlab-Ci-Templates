@@ -1,0 +1,39 @@
+variables:
+  # [用户可配] C++ 构建执行镜像（内置 gcc/g++/cmake/make）
+  # 使用方填写带 gcc/g++ 的镜像，例如 registry.example.com/gcc:13
+  BUILD_CPP_IMAGE: ""
+  # [用户可配] CMake 构建开关
+  BUILD_CPP_CMAKE_ENABLE: "true"
+  # [用户可配] 源码目录（含 CMakeLists.txt）
+  BUILD_CPP_SOURCE_DIR: "."
+  # [用户可配] 构建目录
+  BUILD_CPP_BUILD_DIR: "build"
+  # [用户可配] 构建类型（Debug / Release / RelWithDebInfo / MinSizeRel）
+  BUILD_CPP_BUILD_TYPE: "Release"
+  # [用户可配] 生成器（Unix Makefiles / Ninja / ...）
+  BUILD_CPP_GENERATOR: "Unix Makefiles"
+  # [用户可配] 并行度（留空自动取 nproc）
+  BUILD_CPP_PARALLEL: ""
+  # [用户可配] 是否导出 compile_commands.json（供 clang-tidy 消费）
+  BUILD_CPP_EXPORT_COMPILE_COMMANDS: "true"
+  # [用户可配] 额外 cmake 配置参数（-D...）
+  BUILD_CPP_CMAKE_ARGS: ""
+  # [用户可配] 额外 cmake --build 参数
+  BUILD_CPP_BUILD_ARGS: ""
+  # [用户可配] 构建后 install 目录（留空则不 install）
+  BUILD_CPP_INSTALL_DIR: ""
+  # [用户可配] 产物路径（供 artifacts 收集）
+  BUILD_CPP_ARTIFACT_PATH: "build/"
+
+  # ==== 脚本/Make 构建 .make-build（非 CMake 工程：跑仓库内 make/autobuild.sh 等） ====
+  # [用户可配] make 构建开关
+  BUILD_CPP_MAKE_ENABLE: "true"
+  # [用户可配] 执行构建前 cd 的工作目录
+  BUILD_CPP_MAKE_WORKDIR: "."
+  # [用户可配] 构建命令（默认 make；可写成 "sh autobuild.sh" / "cd LogicLib && sh u.sh && cd .. && make" 等）
+  BUILD_CPP_MAKE_SCRIPT: "make"
+  # [用户可配] make 产物路径（供 artifacts 收集）
+  BUILD_CPP_MAKE_ARTIFACT_PATH: "bin/"
+  # [用户可配] 启用 ccache 编译缓存（增量编译提速）。需执行镜像/编译机已安装 ccache。
+  #   =true 时：CCACHE_DIR 设到项目内 .ccache/ 并经 GitLab cache 复用；cmake 用 COMPILER_LAUNCHER；make 需 makefile 支持 CC/CXX 前缀。
+  BUILD_CPP_CCACHE_ENABLE: "false"

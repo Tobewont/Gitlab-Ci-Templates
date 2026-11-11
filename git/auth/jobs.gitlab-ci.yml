@@ -1,0 +1,61 @@
+# 原子能力：Git HTTPS 认证、私有子模块检出
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/git/auth/variables.gitlab-ci.yml'
+
+# 为 Git HTTPS 配置认证：把本能力的域名、用户名、token 写入 ~/.netrc。
+# 之后 git clone、go module 拉私有仓、构建期访问私有依赖都会走这份认证。
+# 依赖变量：GIT_HTTPS_DOMAIN、GIT_HTTPS_USERNAME、GIT_HTTPS_TOKEN（默认引用 base）
+# 用法：before_script: - !reference [.git-https-auth, before_script]
+.git-https-auth:
+  before_script:
+    - |
+      DOMAIN="$GIT_HTTPS_DOMAIN"
+      USER="$GIT_HTTPS_USERNAME"
+      TOKEN="$GIT_HTTPS_TOKEN"
+      if [ -z "$DOMAIN" ] || [ -z "$USER" ] || [ -z "$TOKEN" ]; then
+        echo "[skip] .git-https-auth: 需要 GIT_HTTPS_DOMAIN、GIT_HTTPS_USERNAME 和 GIT_HTTPS_TOKEN"
+      else
+        {
+          echo "machine $DOMAIN"
+          echo "login $USER"
+          echo "password $TOKEN"
+        } > "$HOME/.netrc"
+        chmod 600 "$HOME/.netrc"
+        git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
+        echo "已配置 Git HTTPS 认证（$DOMAIN）"
+      fi
+
+# 检出私有子模块：用 insteadOf 注入本能力的 Git 认证后递归拉取。
+# 适用于 GitLab 内置 GIT_SUBMODULE_STRATEGY 无法覆盖私有子模块认证的场景。
+# 依赖变量：GIT_SUBMODULE_DOMAIN、GIT_SUBMODULE_USERNAME、GIT_SUBMODULE_TOKEN（默认引用 base）；开关 GIT_SUBMODULE_CHECKOUT_ENABLE
+# 用法：before_script: - !reference [.submodule-checkout, before_script]
+.submodule-checkout:
+  before_script:
+    - |
+      if [ "${GIT_SUBMODULE_CHECKOUT_ENABLE:-true}" != "true" ]; then
+        echo "[skip] .submodule-checkout 未启用（GIT_SUBMODULE_CHECKOUT_ENABLE=${GIT_SUBMODULE_CHECKOUT_ENABLE:-true}）"
+      else
+        DOMAIN="$GIT_SUBMODULE_DOMAIN"
+        USER="$GIT_SUBMODULE_USERNAME"
+        TOKEN="$GIT_SUBMODULE_TOKEN"
+        if [ -z "$DOMAIN" ] || [ -z "$USER" ] || [ -z "$TOKEN" ]; then
+          echo "[skip] .submodule-checkout: 需要 GIT_SUBMODULE_DOMAIN、GIT_SUBMODULE_USERNAME 和 GIT_SUBMODULE_TOKEN"
+        elif [ ! -f .gitmodules ]; then
+          echo "[skip] .submodule-checkout: 当前仓库无 .gitmodules"
+        else
+          command -v git >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache git >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq git >/dev/null 2>&1)
+          git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
+          git config --global --add safe.directory "*" 2>/dev/null || true
+          # 用 insteadOf 把 https/http/ssh 形式的域名地址统一重写为带认证的地址（对 submodule 递归 clone 可靠生效）
+          AUTH_HTTPS="https://$USER:$TOKEN@$DOMAIN/"
+          AUTH_HTTP="http://$USER:$TOKEN@$DOMAIN/"
+          git config --global "url.${AUTH_HTTPS}.insteadOf" "https://$DOMAIN/"
+          git config --global "url.${AUTH_HTTP}.insteadOf" "http://$DOMAIN/"
+          git config --global "url.${AUTH_HTTPS}.insteadOf" "git@$DOMAIN:" 2>/dev/null || true
+          echo "==> git submodule update --init --recursive"
+          git submodule update --init --recursive
+          echo "子模块已检出（$DOMAIN）"
+        fi
+      fi

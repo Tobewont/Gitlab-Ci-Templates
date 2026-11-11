@@ -1,0 +1,10 @@
+variables:
+  # [用户可配] JFrog CLI 镜像
+  SEC_JFROG_IMAGE: "registry.example.com/cicd/jfrog-cli-full-v2-jf:latest"
+  # [用户可配] JFrog Xray 扫描开关
+  SEC_JFROG_XRAY_ENABLE: "false"
+  # [用户可配] JFrog 平台 URL 与 Token（通过 GitLab CI/CD Variables masked 注入）
+  SEC_JFROG_URL: ""
+  SEC_JFROG_TOKEN: ""
+  # [用户可配] 扫描类型（audit / audit-go / audit-mvn / audit-npm 等）
+  SEC_JFROG_XRAY_TYPE: "audit-go"

@@ -1,0 +1,17 @@
+variables:
+  # [用户可配] 是否启用 AI 评审
+  AI_REVIEW_ENABLE: "true"
+  # [用户可配] LLM 参数。默认 base 的 LLM_MODEL / LLM_API_URL / LLM_API_KEY / LLM_TEMPERATURE / LLM_TOP_P
+  AI_REVIEW_LLM_MODEL: "$LLM_MODEL"
+  AI_REVIEW_LLM_API_URL: "$LLM_API_URL"
+  AI_REVIEW_LLM_API_KEY: "$LLM_API_KEY"
+  AI_REVIEW_LLM_TEMPERATURE: "$LLM_TEMPERATURE"
+  AI_REVIEW_LLM_TOP_P: "$LLM_TOP_P"
+  # [用户可配] 回写行评的 GitLab API token。默认 GITLAB_TOKEN
+  AI_REVIEW_GITLAB_TOKEN: "$GITLAB_TOKEN"
+  # [用户可配] 执行镜像（需含 python3）
+  AI_REVIEW_IMAGE: "registry.example.com/library/python:3.13-slim"
+  # [用户可配] 变更文件过滤正则（默认扫描所有代码文件）
+  AI_REVIEW_FILE_GLOB: "\\.(py|js|ts|jsx|tsx|java|go|cpp|c|h|hpp|php|rb|cs|swift|kt|scala|sh)$"
+  # [用户可配] 单次评审最多处理的文件数
+  AI_REVIEW_MAX_FILES: "20"

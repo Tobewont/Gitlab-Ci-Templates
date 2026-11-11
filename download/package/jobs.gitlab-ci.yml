@@ -1,0 +1,50 @@
+# 原子能力：从 GitLab Generic Package Registry 下载文件或 manifest 目录
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/download/package/variables.gitlab-ci.yml'
+
+stages: [download]
+
+.package-download:
+  extends: .base-job
+  image: $DOWNLOAD_PACKAGE_IMAGE
+  stage: download
+  variables: {STEP_ENABLE: "$DOWNLOAD_PACKAGE_ENABLE"}
+  script:
+    - |
+      set -eu
+      printf '{}\n' > "$DOWNLOAD_PACKAGE_OUTPUT_MANIFEST"; : > "$DOWNLOAD_PACKAGE_DOTENV_FILE"
+      case "$STEP_ENABLE" in false) echo "[skip] Package download 未启用（DOWNLOAD_PACKAGE_ENABLE=$STEP_ENABLE）"; exit 0 ;; true) ;; *) echo "[error] DOWNLOAD_PACKAGE_ENABLE 必须为 true/false"; exit 1 ;; esac
+      for cmd in curl jq sha256sum find mkdir mktemp rm wc tr sed sort awk grep dirname mv cat; do command -v "$cmd" >/dev/null 2>&1 || { echo "[error] 镜像缺少命令: $cmd"; exit 1; }; done
+      curl --help all 2>/dev/null | grep -q -- '--fail-with-body' || { echo "[error] curl 版本过低，缺少 --fail-with-body"; exit 1; }
+      for name in DOWNLOAD_PACKAGE_API_URL DOWNLOAD_PACKAGE_PROJECT_ID DOWNLOAD_PACKAGE_NAME DOWNLOAD_PACKAGE_VERSION DOWNLOAD_PACKAGE_TOKEN_HEADER DOWNLOAD_PACKAGE_TOKEN DOWNLOAD_PACKAGE_DEST_DIR; do eval "value=\${$name:-}"; [ -n "$value" ] || { echo "[error] $name 未配置"; exit 1; }; done
+      case "$DOWNLOAD_PACKAGE_TYPE" in file|manifest) ;; *) echo "[error] DOWNLOAD_PACKAGE_TYPE 必须为 file/manifest（Generic Package 无目录枚举接口）"; exit 1 ;; esac
+      case "$DOWNLOAD_PACKAGE_API_URL" in *@*) echo "[error] API URL 禁止内嵌凭据"; exit 1 ;; https://*) ;; http://gitlab:[0-9]*/*|http://localhost:[0-9]*/*) ;; *) echo "[error] API URL 必须为 HTTPS（沙盘 gitlab/localhost 明文除外）"; exit 1 ;; esac
+      for value in "$DOWNLOAD_PACKAGE_PROJECT_ID" "$DOWNLOAD_PACKAGE_NAME" "$DOWNLOAD_PACKAGE_VERSION"; do case "$value" in ''|*[!A-Za-z0-9._-]*) echo "[error] project/package/version 格式非法"; exit 1 ;; esac; done
+      safe_path() { case "$1" in ''|*[!A-Za-z0-9._/-]*|/*|*//*|.|..|./*|../*|*/./*|*/../*|*/.|*/..) return 1 ;; *) return 0 ;; esac; }
+      safe_path "$DOWNLOAD_PACKAGE_DEST_DIR" || { echo "[error] DEST_DIR 非法"; exit 1; }
+      case "/$DOWNLOAD_PACKAGE_OUTPUT_MANIFEST" in "/$DOWNLOAD_PACKAGE_DEST_DIR"/*) echo "[error] 输出 manifest 不能位于 DEST_DIR 内"; exit 1 ;; esac
+      case "/$DOWNLOAD_PACKAGE_DOTENV_FILE" in "/$DOWNLOAD_PACKAGE_DEST_DIR"/*) echo "[error] DOTENV_FILE 不能位于 DEST_DIR 内"; exit 1 ;; esac
+      for name in DOWNLOAD_PACKAGE_CONNECT_TIMEOUT DOWNLOAD_PACKAGE_REQUEST_TIMEOUT DOWNLOAD_PACKAGE_RETRY_COUNT DOWNLOAD_PACKAGE_MAX_FILES DOWNLOAD_PACKAGE_MAX_FILE_BYTES DOWNLOAD_PACKAGE_MAX_TOTAL_BYTES; do eval "value=\${$name}"; case "$value" in *[!0-9]*|'') exit 1 ;; esac; done
+      [ ! -e "$DOWNLOAD_PACKAGE_DEST_DIR" ] || { echo "[error] 输出目录已存在"; exit 1; }; mkdir -p "$DOWNLOAD_PACKAGE_DEST_DIR"; work=$(mktemp -d); cleanup() { rm -rf "$work"; }; trap cleanup EXIT HUP INT TERM
+      if [ "$DOWNLOAD_PACKAGE_TYPE" = file ]; then
+        printf '%s' "$DOWNLOAD_PACKAGE_PATHS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d' | sort -u > "$work/paths"
+      else
+        [ -f "$DOWNLOAD_PACKAGE_MANIFEST_FILE" ] || { echo "[error] manifest 模式必须提供本地 manifest 文件"; exit 1; }
+        [ "$(jq -r '.files | type' "$DOWNLOAD_PACKAGE_MANIFEST_FILE" 2>/dev/null)" = "array" ] || { echo "[error] manifest.files 必须是数组"; exit 1; }
+        jq -r '.files[] | if type == "object" then .path elif type == "string" then . else null end' "$DOWNLOAD_PACKAGE_MANIFEST_FILE" | sort -u > "$work/paths"
+        grep -qvx 'null' "$work/paths" || { echo "[error] manifest.files 只允许字符串或含 path 的对象"; exit 1; }
+        grep -q '^.' "$work/paths" || { echo "[error] manifest.files 路径不能为空"; exit 1; }
+      fi
+      [ -s "$work/paths" ] || { echo "[error] 下载文件列表为空"; exit 1; }; count=$(wc -l < "$work/paths" | tr -d ' '); [ "$count" -le "$DOWNLOAD_PACKAGE_MAX_FILES" ] || exit 1
+      base=${DOWNLOAD_PACKAGE_API_URL%/}/projects/$DOWNLOAD_PACKAGE_PROJECT_ID/packages/generic/$DOWNLOAD_PACKAGE_NAME/$DOWNLOAD_PACKAGE_VERSION
+      while IFS= read -r path; do safe_path "$path" || { echo "[error] 非法文件路径: $path"; exit 1; }; mkdir -p "$DOWNLOAD_PACKAGE_DEST_DIR/$(dirname "$path")"; curl --fail --silent --show-error --location --connect-timeout "$DOWNLOAD_PACKAGE_CONNECT_TIMEOUT" --max-time "$DOWNLOAD_PACKAGE_REQUEST_TIMEOUT" --retry "$DOWNLOAD_PACKAGE_RETRY_COUNT" --header "$DOWNLOAD_PACKAGE_TOKEN_HEADER: $DOWNLOAD_PACKAGE_TOKEN" --output "$work/download.tmp" "$base/$path" || { echo "[error] 下载失败: $path"; rm -rf "$DOWNLOAD_PACKAGE_DEST_DIR"; exit 1; }; mv "$work/download.tmp" "$DOWNLOAD_PACKAGE_DEST_DIR/$path"; done < "$work/paths"
+      find "$DOWNLOAD_PACKAGE_DEST_DIR" -type f -print | sort > "$work/files"; printf '[]' > "$work/items"; total=0
+      while IFS= read -r file; do size=$(wc -c < "$file" | tr -d ' '); [ "$size" -gt 0 ] && [ "$size" -le "$DOWNLOAD_PACKAGE_MAX_FILE_BYTES" ] || exit 1; total=$((total+size)); [ "$total" -le "$DOWNLOAD_PACKAGE_MAX_TOTAL_BYTES" ] || exit 1; rel=${file#"$DOWNLOAD_PACKAGE_DEST_DIR/"}; sha=$(sha256sum "$file" | awk '{print $1}'); jq --arg path "$rel" --arg sha "$sha" --arg size "$size" '. + [{path:$path,size:($size|tonumber),sha256:$sha}]' "$work/items" > "$work/next"; mv "$work/next" "$work/items"; done < "$work/files"
+      jq --arg source package --arg type "$DOWNLOAD_PACKAGE_TYPE" --arg output "$DOWNLOAD_PACKAGE_DEST_DIR" '{source:$source,type:$type,output_dir:$output,files:.}' "$work/items" > "$DOWNLOAD_PACKAGE_OUTPUT_MANIFEST"
+      printf 'DOWNLOAD_OUTPUT_DIR=%s\nDOWNLOAD_FILE_COUNT=%s\nDOWNLOAD_MANIFEST_FILE=%s\n' "$DOWNLOAD_PACKAGE_DEST_DIR" "$count" "$DOWNLOAD_PACKAGE_OUTPUT_MANIFEST" > "$DOWNLOAD_PACKAGE_DOTENV_FILE"
+  artifacts:
+    expire_in: "1 day"
+    paths: [$DOWNLOAD_PACKAGE_DEST_DIR, $DOWNLOAD_PACKAGE_OUTPUT_MANIFEST]
+    reports: {dotenv: $DOWNLOAD_PACKAGE_DOTENV_FILE}

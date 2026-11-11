@@ -1,0 +1,7 @@
+# 场景文案：代码扫描
+.notify-msg-scan:
+  script:
+    - |
+      if [ "${NOTIFY_SCENARIO:-pipeline}" = "scan" ]; then
+        _SCN="代码扫描"; _EXTRA=""; export _SCN _EXTRA
+      fi

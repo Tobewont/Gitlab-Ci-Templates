@@ -1,0 +1,9 @@
+variables:
+  # [用户可配] Lua 静态检查执行镜像（内置 luacheck）
+  LINT_LUA_IMAGE: "registry.example.com/cicd/luacheck:v1.0.0"
+  # [用户可配] luacheck 开关
+  LINT_LUA_LUACHECK_ENABLE: "true"
+  # [用户可配] luacheck 配置文件（留空则用 .luacheckrc 默认）
+  LINT_LUA_LUACHECK_CONFIG: ".luacheckrc"
+  # [用户可配] 扫描目录（默认整个仓库）
+  LINT_LUA_LUACHECK_PATH: "."

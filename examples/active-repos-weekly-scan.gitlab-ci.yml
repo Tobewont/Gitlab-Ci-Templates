@@ -1,0 +1,60 @@
+# 活跃工程/分支每周批量扫描示例
+#
+# 场景：每周跑一次，找出一周内的活跃工程与其活跃分支，
+#       拉下代码后在工程目录执行 SCAN_ACTIVE_NPX_CMD。
+#       每个「工程+分支」组合互不影响，失败只在末尾汇总日志中记录。
+#
+# 定时怎么配（不在模板里，在本文件 + GitLab 页面）：
+#   1) 下方 workflow rules 放行 $CI_PIPELINE_SOURCE == "schedule"；
+#   2) 项目 Settings → CI/CD → Pipeline schedules → New schedule，
+#      Interval pattern 填 cron：0 3 * * 1  （每周一 03:00，时区按需选择）。
+#
+# 需要在 Settings → CI/CD → Variables（masked）注入：
+#   GITLAB_TOKEN   discover 需 read_api，clone 需 read_repository（同一个 token 即可）
+
+include:
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'scan/active-repos/jobs.gitlab-ci.yml'
+
+workflow:
+  rules:
+    # 定时触发（每周一次，cron 在 Pipeline schedules 里配）
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    # 允许手动补跑一次
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    # 其余场景不跑（本项目只承载扫描调度，不需要 push/MR 流水线）
+    - when: never
+
+variables:
+  # ── 活跃范围（三个维度独立可调）──
+  SCAN_ACTIVE_GROUPS: "my-group"                # 扫描范围；留空=全局（token 可见的所有工程）
+  SCAN_ACTIVE_WINDOW_DAYS: "7"                  # 活跃窗口：一周（可改 14 / 30）
+  SCAN_ACTIVE_PROJECT_TOP_N: "0"                # 0=窗口内全部活跃工程；N=最活跃的前 N 个
+  SCAN_ACTIVE_BRANCH_TOP_N: "1"                 # 1=仅默认分支；0=全部活跃分支；N=默认分支+最活跃(N-1)个
+  SCAN_ACTIVE_PROJECT_EXCLUDE: "(^|/)(archive|demo|sandbox)"   # 排除归档/演示仓
+  SCAN_ACTIVE_BRANCH_EXCLUDE: "^(gh-pages|tmp/.*)$"            # 排除无需扫描的分支
+  # ── 扫描执行 ──
+  SCAN_ACTIVE_NPX_CMD: "npx -y eslint ."
+  SCAN_ACTIVE_NPX_PREWARM_CMD: "npx -y eslint --version"
+  SCAN_ACTIVE_TIMEOUT_SECONDS: "1800"           # 单个「工程+分支」30 分钟超时
+  SCAN_ACTIVE_CONCURRENCY: "1"                  # 串行（日志最清晰）；组合多时可调 2~4
+
+stages:
+  - scan
+
+# 1) 发现活跃工程与活跃分支（纯 API，只读）
+active-repos-discover:
+  extends: .active-repos-discover
+
+# 2) 逐「工程+分支」组合 clone + 执行 npx（组合间失败隔离，末尾汇总）
+active-repos-scan:
+  extends: .active-repos-scan
+  needs: [active-repos-discover]        # 必须 needs，用于取清单 artifacts + dotenv
+  rules:
+    # 窗口内没有待扫描的工程/分支组合时直接不创建本 job
+    - if: '$SCAN_ACTIVE_TARGET_COUNT == "0"'
+      when: never
+    - when: on_success
+  # 定时与手动补跑不会互相踩：同一时刻只跑一个
+  resource_group: active-repos-scan

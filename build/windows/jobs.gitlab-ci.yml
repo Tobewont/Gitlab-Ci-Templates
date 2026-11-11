@@ -1,0 +1,47 @@
+# 原子能力：Windows 专用构建（.msbuild / .windows-bat）
+# 路由到 Windows shell runner（tags: [windows]）
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/build/windows/variables.gitlab-ci.yml'
+
+stages:
+  - build
+
+# MSBuild（Visual Studio 编译 .NET / C++ 项目）
+.msbuild:
+  stage: build
+  tags:
+    - windows
+  variables:
+    STEP_NAME: "MSBuild"
+    STEP_ENABLE: "$BUILD_MSBUILD_ENABLE"
+  script:
+    - |
+      if ($env:STEP_ENABLE -ne "true") { Write-Host "[skip] $env:STEP_NAME 未启用（BUILD_MSBUILD_ENABLE=$env:STEP_ENABLE）"; exit 0 }
+      if (-not $env:BUILD_MSBUILD_SOLUTION) { Write-Host "[skip] BUILD_MSBUILD_SOLUTION 未配置"; exit 0 }
+      if ($env:BUILD_MSBUILD_VSDEVCMD -and (Test-Path $env:BUILD_MSBUILD_VSDEVCMD)) {
+        Write-Host "加载 Visual Studio 开发者环境: $env:BUILD_MSBUILD_VSDEVCMD"
+        cmd /c "`"$env:BUILD_MSBUILD_VSDEVCMD`" && msbuild `"$env:BUILD_MSBUILD_SOLUTION`" /p:Configuration=$env:BUILD_MSBUILD_CONFIGURATION /p:Platform=`"$env:BUILD_MSBUILD_PLATFORM`" $env:BUILD_MSBUILD_EXTRA_ARGS"
+      } else {
+        msbuild $env:BUILD_MSBUILD_SOLUTION /p:Configuration=$env:BUILD_MSBUILD_CONFIGURATION /p:Platform=$env:BUILD_MSBUILD_PLATFORM $env:BUILD_MSBUILD_EXTRA_ARGS.Split(' ')
+      }
+      if ($LASTEXITCODE -ne 0) { Write-Error "MSBuild failed with exit code $LASTEXITCODE"; exit $LASTEXITCODE }
+      Write-Host "MSBuild 构建成功"
+
+# 通用 Windows .bat 脚本执行
+.windows-bat:
+  stage: build
+  tags:
+    - windows
+  variables:
+    STEP_NAME: "Windows Batch"
+    STEP_ENABLE: "$BUILD_WIN_BAT_ENABLE"
+  script:
+    - |
+      if ($env:STEP_ENABLE -ne "true") { Write-Host "[skip] $env:STEP_NAME 未启用（BUILD_WIN_BAT_ENABLE=$env:STEP_ENABLE）"; exit 0 }
+      if (-not $env:BUILD_WIN_BAT_SCRIPT) { Write-Host "[skip] BUILD_WIN_BAT_SCRIPT 未配置"; exit 0 }
+      if (-not (Test-Path $env:BUILD_WIN_BAT_SCRIPT)) { Write-Error "脚本不存在: $env:BUILD_WIN_BAT_SCRIPT"; exit 1 }
+      Write-Host "==> 执行 $env:BUILD_WIN_BAT_SCRIPT $env:BUILD_WIN_BAT_ARGS"
+      cmd /c "`"$env:BUILD_WIN_BAT_SCRIPT`" $env:BUILD_WIN_BAT_ARGS"
+      if ($LASTEXITCODE -ne 0) { Write-Error "Batch failed with exit code $LASTEXITCODE"; exit $LASTEXITCODE }

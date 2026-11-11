@@ -1,0 +1,100 @@
+# 原子能力：Go 二进制构建（交叉编译 + 版本 LDFLAGS 注入）
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/build/go/variables.gitlab-ci.yml'
+
+stages:
+  - build
+
+.go-build:
+  extends: .base-job
+  image: $BUILD_GO_IMAGE
+  stage: build
+  variables:
+    STEP_NAME: "Go Build"
+    STEP_ENABLE: "$BUILD_GO_ENABLE"
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（BUILD_GO_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+
+      go env -w GO111MODULE=on
+      # 依赖/编译缓存目录设到项目内，供 GitLab cache 跨 job 复用（k8s runner 走 minio，shell runner 走本地）
+      export GOMODCACHE="$CI_PROJECT_DIR/.gocache/mod"
+      export GOCACHE="$CI_PROJECT_DIR/.gocache/build"
+      mkdir -p "$GOMODCACHE" "$GOCACHE"
+      # GOPROXY:
+      #   1. BUILD_GO_PROXY 显式设置 → 用它
+      #   2. USE_CHINA_MIRROR=true (默认) → goproxy.cn
+      #   3. USE_CHINA_MIRROR=false → 不设置 (用 go 环境或系统默认)
+      if [ -z "$BUILD_GO_PROXY" ] && [ "${USE_CHINA_MIRROR:-true}" = "true" ]; then
+        BUILD_GO_PROXY="https://goproxy.cn,direct"
+      fi
+      [ -n "$BUILD_GO_PROXY" ] && go env -w GOPROXY="$BUILD_GO_PROXY"
+      [ -n "$BUILD_GO_PRIVATE" ]  && go env -w GOPRIVATE="$BUILD_GO_PRIVATE"
+      [ -n "$BUILD_GO_NOSUMDB" ]  && go env -w GONOSUMDB="$BUILD_GO_NOSUMDB"
+
+      # 版本号：优先用 BUILD_GO_VERSION → 其次 CI_APP_VERSION（可由 .git-describe 导出）→ 兜底 git describe
+      VER="${BUILD_GO_VERSION:-${CI_APP_VERSION:-}}"
+      if [ -z "$VER" ]; then
+        VER=$(git describe --long --tags --always 2>/dev/null || echo "$CI_COMMIT_SHORT_SHA")
+      fi
+      BUILDTIME=$(TZ=UTC-8 date "+${BUILD_GO_BUILDTIME_FORMAT}")
+      # commit / 分支：tag 流水线下 CI_COMMIT_REF_NAME 即 tag 名
+      COMMIT_ID="$CI_COMMIT_SHORT_SHA"
+      BRANCH_NAME="$CI_COMMIT_REF_NAME"
+
+      # 版本类 -X 注入：逐项判断 *_SYMBOL，置空则跳过该项
+      # 值统一用单引号包裹：Go linker 会解析引号，使含空格的值（如带时区的编译时间）不被截断
+      LDFLAGS=""
+      if [ "$BUILD_GO_INJECT_VERSION" = "true" ]; then
+        [ -n "$BUILD_GO_VERSION_SYMBOL" ]   && LDFLAGS="$LDFLAGS -X '${BUILD_GO_VERSION_SYMBOL}=${VER}'"
+        [ -n "$BUILD_GO_BUILDTIME_SYMBOL" ] && LDFLAGS="$LDFLAGS -X '${BUILD_GO_BUILDTIME_SYMBOL}=${BUILDTIME}'"
+        [ -n "$BUILD_GO_COMMIT_SYMBOL" ]    && LDFLAGS="$LDFLAGS -X '${BUILD_GO_COMMIT_SYMBOL}=${COMMIT_ID}'"
+        [ -n "$BUILD_GO_BRANCH_SYMBOL" ]    && LDFLAGS="$LDFLAGS -X '${BUILD_GO_BRANCH_SYMBOL}=${BRANCH_NAME}'"
+        LDFLAGS="${LDFLAGS# }"
+      fi
+      [ -n "$BUILD_GO_EXTRA_LDFLAGS" ] && LDFLAGS="${LDFLAGS:+$LDFLAGS }$BUILD_GO_EXTRA_LDFLAGS"
+      echo "==> ldflags: $LDFLAGS"
+
+      PREFIX="${BUILD_GO_OUTPUT_PREFIX:-$CI_PROJECT_NAME}"
+      SUFFIX_MODE="${BUILD_GO_OUTPUT_SUFFIX:-platform}"
+      case "$SUFFIX_MODE" in
+        platform|none) ;;
+        *) echo "[error] BUILD_GO_OUTPUT_SUFFIX 必须为 platform/none，当前值: $SUFFIX_MODE"; exit 1 ;;
+      esac
+      [ -n "$BUILD_GO_PLATFORMS" ] || { echo "[error] BUILD_GO_PLATFORMS 未配置，不会产出任何二进制"; exit 1; }
+      if [ "$SUFFIX_MODE" = "none" ] && echo "$BUILD_GO_PLATFORMS" | grep -q ","; then
+        echo "[error] BUILD_GO_OUTPUT_SUFFIX=none 仅支持单平台（多平台会同名覆盖），当前: $BUILD_GO_PLATFORMS"; exit 1
+      fi
+      mkdir -p "$BUILD_GO_OUTPUT_DIR"
+      cd "$BUILD_GO_SOURCE_DIR"
+
+      # 交叉编译：BUILD_GO_PLATFORMS 支持多个 GOOS/GOARCH，逗号分隔
+      OLDIFS="$IFS"; IFS=,
+      for PLAT in $BUILD_GO_PLATFORMS; do
+        PLAT=$(echo "$PLAT" | tr -d ' ')
+        [ -z "$PLAT" ] && continue
+        GOOS=$(echo "$PLAT" | cut -d/ -f1)
+        GOARCH=$(echo "$PLAT" | cut -d/ -f2)
+        NAME="$PREFIX"
+        [ "$SUFFIX_MODE" = "none" ] || NAME="${PREFIX}-${GOOS}-${GOARCH}"
+        [ "$GOOS" != "windows" ] || NAME="${NAME}.exe"
+        OUT="${CI_PROJECT_DIR}/${BUILD_GO_OUTPUT_DIR}/${NAME}"
+        echo "==> go build GOOS=$GOOS GOARCH=$GOARCH → $OUT"
+        CGO_ENABLED="$BUILD_GO_CGO_ENABLED" GOOS="$GOOS" GOARCH="$GOARCH"           go build $BUILD_GO_EXTRA_ARGS -ldflags "$LDFLAGS" -o "$OUT" "$BUILD_GO_MAIN"
+      done
+      IFS="$OLDIFS"
+      ls -l "${CI_PROJECT_DIR}/${BUILD_GO_OUTPUT_DIR}/"
+  cache:
+    key: "$CI_PROJECT_ID-go"
+    paths:
+      - .gocache/mod/
+      - .gocache/build/
+  artifacts:
+    when: always
+    paths:
+      - $BUILD_GO_OUTPUT_DIR/
+    expire_in: "7 days"

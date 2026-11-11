@@ -1,0 +1,26 @@
+# 场景文案：合规检测
+#   公共字段：项目 / 分支 / 提交人 / 时间 / 流水线 / 状态
+#   不展示【作者】【触发人】【Commit】
+#   正文整条自定义，置 _MSG_CUSTOM=1 让 .notify-msg-default 跳过通用骨架
+.notify-msg-compliance:
+  script:
+    - |
+      if [ "${NOTIFY_SCENARIO:-pipeline}" = "compliance" ]; then
+        _SCN="合规检测"
+        _EXTRA=""
+        _DEF_TITLE="\${EMOJI} \${CI_PROJECT_NAME} \${_SCN}\${STATE}"
+
+        # 检测时间按 Asia/Shanghai；镜像不含 tzdata 时 TZ 被忽略而输出 UTC，故补 +8 小时
+        _CHK_TIME=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "")
+        if [ -z "$_CHK_TIME" ]; then
+          _CHK_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+        elif [ ! -e /usr/share/zoneinfo/Asia/Shanghai ]; then
+          _CHK_TIME=$(date -u -d '+8 hours' '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '%s' "$_CHK_TIME")
+        fi
+
+        _DEF_MSG="【项目】\${CI_PROJECT_NAME}\n【分支】\${CI_COMMIT_REF_NAME}\n【提交人】\${_COMMITTER}\n【时间】\${_CHK_TIME}"
+        _DEF_MSG="${_DEF_MSG}\n【流水线】\${CI_PIPELINE_URL}"
+        _DEF_MSG="${_DEF_MSG}\n【状态】\${_STATUS_JOB_NAME}阶段 \${STATE}\${_DUR_TXT}"
+        _MSG_CUSTOM=1
+        export _SCN _EXTRA _CHK_TIME _DEF_TITLE _DEF_MSG _MSG_CUSTOM
+      fi

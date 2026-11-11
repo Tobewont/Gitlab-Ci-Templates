@@ -1,0 +1,225 @@
+# 原子能力：JS/TS 静态检查（ESLint）
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/git/variables.gitlab-ci.yml'
+  - local: '/git/jobs.gitlab-ci.yml'
+  - local: '/lint/js/variables.gitlab-ci.yml'
+
+stages:
+  - lint
+
+# 可复用 rules 片段：仅当 JS/TS 相关文件变更时才触发（供业务 job 以 !reference 引用，替代无 changes 的 rules）。
+# 用法（业务侧 job）：
+#   rules:
+#     - !reference [.lint-js-mr-changed, rules]        # MR 事件 + JS/TS 变更
+#   或 push 场景：
+#     - !reference [.lint-js-push-changed, rules]
+# 覆盖变更路径：在业务 job 自定义 rules 的 changes 列表即可（rules 的 changes 不支持变量注入，故以片段形式提供默认路径）。
+.lint-js-changed-paths: &lint_js_changed_paths
+  - "**/*.ts"
+  - "**/*.tsx"
+  - "**/*.js"
+  - "**/*.jsx"
+  - "**/*.vue"
+
+.lint-js-mr-changed:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: *lint_js_changed_paths
+
+.lint-js-push-changed:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      changes: *lint_js_changed_paths
+
+# 模板文件拉取片段：preset/默认配置等实体文件统一维护在模板仓，运行时经 GitLab API 拉取，
+# preset/默认配置实体文件维护在模板仓，运行时经 GitLab API 拉取。认证使用 LINT_JS_GITLAB_TOKEN（默认 GITLAB_TOKEN）；为空时用 CI_JOB_TOKEN。
+# 从 LINT_JS_PRESET_PROJECT 的 LINT_JS_PRESET_BRANCH 拉取模板文件。
+# 有 LINT_JS_GITLAB_TOKEN 时用 PRIVATE-TOKEN，否则用 CI_JOB_TOKEN。
+.lint-js-fetch-template-file:
+  script:
+    - |
+      fetch_template_file() {
+        file_path=$1
+        dest_path=$2
+        command -v curl >/dev/null 2>&1 || { echo "[error] 执行镜像缺少命令: curl"; exit 1; }
+        encoded_path=$(printf '%s' "$file_path" | sed 's|/|%2F|g')
+        encoded_project=$(printf '%s' "$LINT_JS_PRESET_PROJECT" | sed 's|/|%2F|g')
+        if [ -n "$LINT_JS_GITLAB_TOKEN" ]; then auth_header="PRIVATE-TOKEN: $LINT_JS_GITLAB_TOKEN"; else auth_header="JOB-TOKEN: $CI_JOB_TOKEN"; fi
+        curl --fail-with-body --silent --show-error --connect-timeout 10 --max-time 60 --header "$auth_header" "$CI_API_V4_URL/projects/$encoded_project/repository/files/$encoded_path/raw?ref=$LINT_JS_PRESET_BRANCH" -o "$dest_path" || { echo "[error] 拉取模板文件失败: $file_path（$LINT_JS_PRESET_PROJECT@$LINT_JS_PRESET_BRANCH）"; exit 1; }
+        [ -s "$dest_path" ] || { echo "[error] 模板文件为空: $file_path"; exit 1; }
+      }
+
+# ── 原子能力：ESLint ───────────────────────────────────────────────
+# 组装 = 取变更文件 + 禁用则跳过 + 过滤 .js/.ts/.jsx/.tsx + eslint 命令。声明 eslint-plugin-vue 时再纳入 .vue。
+.eslint:
+  extends: .base-job
+  image: $LINT_JS_IMAGE
+  stage: lint
+  # 默认仅在 JS/TS 文件变更时触发（MR 或 push）；业务需限定目标分支等可覆盖 rules。
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: *lint_js_changed_paths
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      changes: *lint_js_changed_paths
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  cache:
+    key: "$CI_PROJECT_NAME"
+    paths:
+      - node_modules/
+  variables:
+    STEP_NAME: "ESLint"
+    STEP_ENABLE: "$LINT_JS_ESLINT_ENABLE"
+    STEP_FILE_GLOB: '\.(js|ts|jsx|tsx)$'
+    STEP_FILTER_EXISTING: "true"
+  before_script:
+    - !reference [.get-changed-files, before_script]
+  script:
+    - !reference [.skip-if-disabled, script]
+    - !reference [.lint-js-fetch-template-file, script]
+    - |
+      # 开启原生报告时先建合法空占位（[] 对齐 eslint -f json 数组格式），保证 artifact 始终存在
+      if [ "$LINT_JS_ESLINT_SONAR_REPORT" = "true" ]; then
+        echo '[]' > "$LINT_JS_ESLINT_SONAR_REPORT_PATH"
+      fi
+    - |
+      # ── eslint 配置来源 ──
+      # 项目自带 .eslintrc* / eslint.config.js 优先。全部缺失且 LINT_JS_ESLINT_DEFAULT_CONFIG=true 时，
+      # 拉取模板库默认 .eslintrc.json。
+      ESLINT_CFG_ARGS=""
+      if [ "$LINT_JS_ESLINT_DEFAULT_CONFIG" = "true" ] && [ ! -f .eslintrc.json ] && [ ! -f .eslintrc.js ] && [ ! -f .eslintrc ] && [ ! -f .eslintrc.yml ] && [ ! -f .eslintrc.yaml ] && [ ! -f eslint.config.js ]; then
+        echo "[info] 未发现项目 eslint 配置，写出模板库默认 .eslintrc.json 兜底"
+        fetch_template_file "lint/js/presets/default/.eslintrc.json" ".eslintrc.json"
+      fi
+      # 无 package.json 时写出默认 package.json（仅含 lint 依赖），供 eslint 解析插件
+      [ -f package.json ] || { echo "[info] 写出默认 package.json"; fetch_template_file "lint/js/presets/default/package.json" "package.json"; }
+      # 依赖来源优先级：项目本地 node_modules > 预装镜像（容器内 LINT_TOOLS_DIR，运行时探测）> 临时 npm install
+      # 声明 eslint-plugin-vue 时，安装项目里的 Vue 插件并从项目 node_modules 解析，同时把 .vue 纳入过滤。
+      ESLINT_RESOLVE_ARGS=""
+      TOOLS_DIR="${LINT_JS_TOOLS_DIR:-${LINT_TOOLS_DIR:-/opt/lint-tools}}"
+      VUE_ESLINT_PKGS=""
+      if [ -f package.json ]; then
+        VUE_ESLINT_PKGS=$(node -e 'const fs=require("fs"); const pkg=JSON.parse(fs.readFileSync("package.json","utf8")); const deps=Object.assign({}, pkg.dependencies, pkg.devDependencies, pkg.optionalDependencies); if(!Object.prototype.hasOwnProperty.call(deps,"eslint-plugin-vue")) process.exit(0); const names=["eslint","eslint-plugin-vue","vue-eslint-parser","@vue/eslint-config-prettier","eslint-plugin-prettier","eslint-config-prettier","prettier"]; process.stdout.write(names.filter(function(n){return deps[n];}).map(function(n){return n+"@"+deps[n];}).join(" "));' || true)
+      fi
+      if [ -n "$VUE_ESLINT_PKGS" ]; then
+        echo "[info] 检测到 eslint-plugin-vue，安装项目声明的 Vue ESLint 插件"
+        # 装到临时目录，避免 npm 解析业务 package.json 的依赖树
+        VUE_ESLINT_DIR=$(mktemp -d)
+        (
+          cd "$VUE_ESLINT_DIR"
+          npm init -y >/dev/null
+          # shellcheck disable=SC2086
+          npm install --ignore-scripts --no-audit --no-fund --legacy-peer-deps --registry "${LINT_JS_NPM_REGISTRY:-https://registry.npmmirror.com}" $VUE_ESLINT_PKGS
+        )
+        mkdir -p node_modules
+        cp -a "$VUE_ESLINT_DIR/node_modules/." node_modules/
+        ESLINT_RESOLVE_ARGS=""
+        case "$STEP_FILE_GLOB" in
+          *vue*) ;;
+          *')$'*)
+            _base=${STEP_FILE_GLOB%"$"}
+            export STEP_FILE_GLOB="${_base%")"}|vue)$"
+            ;;
+          *')')
+            export STEP_FILE_GLOB="${STEP_FILE_GLOB%")"}|vue)"
+            ;;
+        esac
+        echo "[info] Vue 插件放入项目 node_modules，变更过滤：${STEP_FILE_GLOB}"
+      elif [ -d node_modules/@typescript-eslint/eslint-plugin ]; then
+        echo "[info] 使用项目本地 node_modules 的 eslint 依赖"
+      elif [ -d "$TOOLS_DIR/node_modules/@typescript-eslint/eslint-plugin" ]; then
+        echo "[info] 使用预装镜像 eslint 依赖（$TOOLS_DIR，免 npm install）"
+        ESLINT_RESOLVE_ARGS="--resolve-plugins-relative-to $TOOLS_DIR"
+      elif [ "${LINT_JS_ESLINT_AUTO_INSTALL:-true}" = "true" ]; then
+        echo "[info] 安装 eslint 依赖（npm install）"
+        npm install --no-audit --no-fund --registry "${LINT_JS_NPM_REGISTRY:-https://registry.npmmirror.com}"
+      fi
+    - !reference [.filter-changed-files, script]
+    - |
+      # ── 可选：产出 ESLint 原生 JSON（供 .upload-sonar 转 Sonar externalIssues 消费）──
+      if [ "$LINT_JS_ESLINT_SONAR_REPORT" = "true" ]; then
+        echo "==> 生成 ESLint 原生报告：$LINT_JS_ESLINT_SONAR_REPORT_PATH（供 .upload-sonar 消费）"
+        # -o 报告始终产出，即便有 lint 问题也不在此中断，卡点交给下方 ESLint 检查
+        eslint $ESLINT_RESOLVE_ARGS $ESLINT_CFG_ARGS $STEP_MATCHED_FILES -f json -o "$LINT_JS_ESLINT_SONAR_REPORT_PATH" || true
+        [ -f "$LINT_JS_ESLINT_SONAR_REPORT_PATH" ] || echo '[]' > "$LINT_JS_ESLINT_SONAR_REPORT_PATH"
+      fi
+    - |
+      # ── ESLint 检查（决定本 job 成败 / 卡点）──
+      if [ -x "${LINT_JS_SCRIPT_DIR}/eslint.sh" ]; then
+        ${LINT_JS_SCRIPT_DIR}/eslint.sh $STEP_MATCHED_FILES
+      elif command -v eslint >/dev/null 2>&1; then
+        echo "待扫描文件：$STEP_MATCHED_FILES"
+        eslint $ESLINT_RESOLVE_ARGS $ESLINT_CFG_ARGS $STEP_MATCHED_FILES
+      else
+        echo "[error] 未找到 ESLint 执行脚本或命令（${LINT_JS_SCRIPT_DIR}/eslint.sh 或 eslint），无法执行检查"; exit 1
+      fi
+  artifacts:
+    when: always
+    paths:
+      - "$LINT_JS_ESLINT_SONAR_REPORT_PATH"
+    expire_in: "1 day"
+
+# 原子能力：Prettier 前端代码格式化检查（仅检查，不修改）
+.prettier:
+  extends: .base-job
+  image: $LINT_JS_IMAGE
+  stage: lint
+  # 默认仅在 JS/TS 文件变更时触发（MR 或 push）；业务需限定目标分支等可覆盖 rules。
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: *lint_js_changed_paths
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      changes: *lint_js_changed_paths
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  cache:
+    key: "$CI_PROJECT_NAME"
+    paths:
+      - node_modules/
+  variables:
+    STEP_NAME: "Prettier"
+    STEP_ENABLE: "$LINT_JS_PRETTIER_ENABLE"
+    STEP_FILE_GLOB: '\.(js|ts|jsx|tsx|json|css|scss|less|md|html|vue)$'
+    STEP_FILTER_EXISTING: "true"
+  before_script:
+    - !reference [.get-changed-files, before_script]
+  script:
+    - !reference [.skip-if-disabled, script]
+    - !reference [.lint-js-fetch-template-file, script]
+    - !reference [.filter-changed-files, script]
+    - |
+      TARGETS="${LINT_JS_PRETTIER_TARGET:-$STEP_MATCHED_FILES}"
+      if [ -z "$TARGETS" ]; then
+        echo "[skip] prettier：无匹配的变更文件"; exit 0
+      fi
+      # prettier 来源：项目内 / PATH（预装镜像）/ 临时安装
+      PT_DIR="${LINT_JS_TOOLS_DIR:-${LINT_TOOLS_DIR:-/opt/lint-tools}}"
+      if ! command -v prettier >/dev/null 2>&1 && [ ! -x node_modules/.bin/prettier ] && [ ! -x "$PT_DIR/node_modules/.bin/prettier" ]; then
+        [ -f package.json ] || fetch_template_file "lint/js/presets/default/package.json" "package.json"
+        npm install --no-save --registry "${LINT_JS_NPM_REGISTRY:-https://registry.npmmirror.com}" prettier >/dev/null 2>&1
+      fi
+      PRETTIER="$(command -v prettier || { [ -x "$PT_DIR/node_modules/.bin/prettier" ] && echo "$PT_DIR/node_modules/.bin/prettier"; } || echo node_modules/.bin/prettier)"
+      # 配置兜底：
+      #   项目自带 .prettierrc / .prettierignore 时用项目的；缺失且开启兜底时内联写出模板库默认配置。
+      if [ "$LINT_JS_PRETTIER_DEFAULT_CONFIG" = "true" ] && [ -z "$LINT_JS_PRETTIER_CONFIG" ] && [ ! -f .prettierrc ] && [ ! -f .prettierrc.json ] && [ ! -f .prettierrc.js ] && [ ! -f prettier.config.js ]; then
+        echo "[info] 未发现项目 prettier 配置，写出模板库默认 .prettierrc（printWidth 140 / tabWidth 4 / 双引号）"
+        fetch_template_file "lint/js/default.prettierrc.json" ".prettierrc"
+      fi
+      if [ "$LINT_JS_PRETTIER_DEFAULT_CONFIG" = "true" ] && [ ! -f "$LINT_JS_PRETTIER_IGNORE_PATH" ]; then
+        echo "[info] 未发现 $LINT_JS_PRETTIER_IGNORE_PATH，写出模板库默认 .prettierignore"
+        fetch_template_file "lint/js/default.prettierignore" "$LINT_JS_PRETTIER_IGNORE_PATH"
+      fi
+      CFG=""
+      [ -n "$LINT_JS_PRETTIER_CONFIG" ] && CFG="--config $LINT_JS_PRETTIER_CONFIG"
+      IGN=""
+      [ -f "$LINT_JS_PRETTIER_IGNORE_PATH" ] && IGN="--ignore-path $LINT_JS_PRETTIER_IGNORE_PATH"
+      echo "==> prettier --check $CFG $IGN <files>"
+      echo "$TARGETS" | xargs $PRETTIER --check $CFG $IGN

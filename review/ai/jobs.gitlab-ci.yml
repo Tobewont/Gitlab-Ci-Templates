@@ -1,0 +1,143 @@
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/git/variables.gitlab-ci.yml'
+  - local: '/git/jobs.gitlab-ci.yml'
+  - local: '/review/ai/variables.gitlab-ci.yml'
+
+stages:
+  - review
+
+# AI 代码评审：取变更 → 逐文件调 LLM → POST commits/{sha}/comments 回写行评
+.ai-review:
+  extends: .base-job
+  image: $AI_REVIEW_IMAGE
+  stage: review
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "AI 代码评审"
+    STEP_ENABLE: "$AI_REVIEW_ENABLE"
+    STEP_FILE_GLOB: "$AI_REVIEW_FILE_GLOB"
+  before_script:
+    - export LC_ALL="$CI_LOCALE"; export LANG="$CI_LOCALE"
+    - !reference [.get-changed-files, before_script]
+  script:
+    - !reference [.skip-if-disabled, script]
+    - !reference [.filter-changed-files, script]
+    - |
+      if [ -z "$AI_REVIEW_LLM_API_URL" ] || [ -z "$AI_REVIEW_LLM_API_KEY" ] || [ -z "$AI_REVIEW_LLM_MODEL" ]; then
+        echo "[skip] LLM 参数未配置（需要 AI_REVIEW_LLM_API_URL / AI_REVIEW_LLM_API_KEY / AI_REVIEW_LLM_MODEL）"
+        exit 0
+      fi
+      command -v python3 >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache python3 >/dev/null 2>&1) || true
+      export STEP_MATCHED_FILES
+      python3 - <<'PYEOF'
+      import os, sys, json, urllib.request, urllib.parse
+
+      files = [f for f in os.environ.get("STEP_MATCHED_FILES", "").splitlines() if f.strip()]
+      if not files:
+          print("无匹配的变更文件，跳过 AI 评审")
+          sys.exit(0)
+
+      api_url = os.environ["AI_REVIEW_LLM_API_URL"]
+      api_key = os.environ["AI_REVIEW_LLM_API_KEY"]
+      model   = os.environ["AI_REVIEW_LLM_MODEL"]
+      temperature = float(os.environ.get("AI_REVIEW_LLM_TEMPERATURE", "0.2"))
+      top_p       = float(os.environ.get("AI_REVIEW_LLM_TOP_P", "0.8"))
+      max_files   = int(os.environ.get("AI_REVIEW_MAX_FILES", "20"))
+
+      api_v4   = os.environ.get("CI_API_V4_URL", "")
+      proj_id  = os.environ.get("CI_PROJECT_ID", "")
+      sha      = os.environ.get("CI_COMMIT_SHA", "")
+      gl_token = os.environ.get("AI_REVIEW_GITLAB_TOKEN", "")
+
+      SYSTEM_PROMPT = (
+          "你是资深架构师。对代码做 CodeReview，只报你判定需要研发处理的真实问题，"
+          "维度：逻辑正确性、安全、资源健壮性、性能、可维护性。无问题则返回空数组。"
+          "严格只返回 JSON：{\"issues\":[{\"line\":行号,\"severity\":\"BLOCKER|CRITICAL|MAJOR|MINOR\","
+          "\"message\":\"问题(中文)\",\"reason\":\"原因(中文)\",\"suggestion\":\"建议(中文)\"}]}，"
+          "不要输出除 JSON 外的任何文本。"
+      )
+
+      def call_llm(path, content):
+          user = "评审文件 %s：\n```\n%s\n```" % (path, content[:120000])
+          body = json.dumps({
+              "model": model,
+              "messages": [
+                  {"role": "system", "content": SYSTEM_PROMPT},
+                  {"role": "user", "content": user},
+              ],
+              "temperature": temperature,
+              "top_p": top_p,
+          }).encode("utf-8")
+          req = urllib.request.Request(api_url, data=body, method="POST")
+          req.add_header("Content-Type", "application/json")
+          req.add_header("Authorization", "Bearer " + api_key)
+          try:
+              with urllib.request.urlopen(req, timeout=120) as resp:
+                  data = json.loads(resp.read().decode("utf-8"))
+          except Exception as e:
+              print("  LLM 调用失败 %s: %s" % (path, e), file=sys.stderr)
+              return []
+          txt = ""
+          if data.get("choices"):
+              txt = data["choices"][0].get("message", {}).get("content", "")
+          if not txt:
+              return []
+          if "```json" in txt:
+              txt = txt.split("```json", 1)[1].split("```", 1)[0]
+          elif "```" in txt:
+              txt = txt.split("```", 1)[1].split("```", 1)[0]
+          try:
+              parsed = json.loads(txt.strip())
+          except Exception:
+              return []
+          return parsed if isinstance(parsed, list) else parsed.get("issues", [])
+
+      def post_comment(path, issue):
+          if not (api_v4 and proj_id and sha and gl_token):
+              return False
+          url = "%s/projects/%s/repository/commits/%s/comments" % (api_v4, proj_id, sha)
+          emoji = {"BLOCKER": "🔴", "CRITICAL": "🔴", "MAJOR": "🟠", "MINOR": "🟡"}.get(
+              str(issue.get("severity", "MINOR")).upper(), "🟡")
+          note = "%s **%s** `%s`\n\n**问题：** %s" % (
+              emoji, issue.get("severity", "MINOR"), path, issue.get("message", ""))
+          if issue.get("reason"):
+              note += "\n\n**原因：** " + issue["reason"]
+          if issue.get("suggestion"):
+              note += "\n\n**建议：** " + issue["suggestion"]
+          form = {"note": note, "path": path,
+                  "line": str(issue.get("line", 1)), "line_type": "new"}
+          data = urllib.parse.urlencode(form).encode("utf-8")
+          req = urllib.request.Request(url, data=data, method="POST")
+          req.add_header("PRIVATE-TOKEN", gl_token)
+          try:
+              with urllib.request.urlopen(req, timeout=60):
+                  return True
+          except Exception as e:
+              print("  评论回写失败 %s: %s" % (path, e), file=sys.stderr)
+              return False
+
+      total = 0
+      for path in files[:max_files]:
+          if not os.path.isfile(path):
+              continue
+          try:
+              with open(path, "r", encoding="utf-8", errors="replace") as fp:
+                  content = fp.read()
+          except Exception:
+              continue
+          if not content.strip():
+              continue
+          issues = call_llm(path, content)
+          print("CodeReview %s：%d 个问题" % (path, len(issues)))
+          for it in issues:
+              post_comment(path, it)
+              total += 1
+      print("AI 评审完成，共发现 %d 个问题" % total)
+      PYEOF

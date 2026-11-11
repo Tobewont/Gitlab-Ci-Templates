@@ -1,0 +1,65 @@
+workflow:
+  # CI 配置防合并覆盖前提：MR 事件必须产生 MR 流水线（guard 仅存在于 MR 流水线）；
+  #   分支有打开 MR 时去重分支流水线（保护卡在 MR 流水线，绕过分支流水线也无法合入）
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+# build-filter 示例：commit message 含关键字 → 触发构建；否则跳过后续 stages
+include:
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'common/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'build/docker/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'notify/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'checks/jobs.gitlab-ci.yml'
+
+stages:
+  - filter
+  - build
+  - notify
+
+variables:
+  # ── 构建过滤能力变量
+  # 触发关键字（逗号分隔，任一命中则 NEED_BUILD=true）
+  BUILD_FILTER_KEYWORDS: "build,smoke,release,deploy"
+  # web UI 手动触发（Run pipeline）也认为需要构建
+  BUILD_FILTER_MANUAL_TRIGGER: "true"
+
+  # ── Docker 能力变量
+  BUILD_DOCKER_REGISTRY: "registry.example.com"
+  BUILD_DOCKER_IMAGE_NAME: "myapp/service"
+  BUILD_DOCKER_AUTO_PUSH: "true"
+
+my-filter:
+  extends: .build-filter
+  stage: filter
+
+my-build:
+  extends: .docker-build
+  needs:
+    - my-filter
+  rules:
+    - if: '$NEED_BUILD == "true"'
+
+my-notify:
+  extends: .notify
+  needs:
+    - job: my-build
+      optional: true
+  rules:
+    - if: '$NEED_BUILD == "true"'
+
+# CI 配置防合并覆盖：MR 源分支改动 .gitlab-ci.yml 则 guard 失败、卡死合并（.pre 阶段，先于所有 job；guard 失败则后续 job 全部不启动）
+#   默认启用（CHECKS_CI_CONFIG_GUARD_ENABLE: "true"）；显式设为 "false" 则 guard job 不创建、不作其它 job 前提（needs optional 自动豁免，零等待）
+#   guard 仅在 MR 流水线存在（模板 rules 限定），故上方 workflow rules 必须放行 merge_request_event
+ci-config-guard:
+  extends: .ci-config-guard

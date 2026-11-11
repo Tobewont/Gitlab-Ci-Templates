@@ -1,0 +1,125 @@
+# 原子能力：C++ 静态检查（clang-tidy）
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/git/variables.gitlab-ci.yml'
+  - local: '/git/jobs.gitlab-ci.yml'
+  - local: '/lint/cpp/variables.gitlab-ci.yml'
+
+stages:
+  - lint
+
+.clang-tidy:
+  extends: .base-job
+  image: $LINT_CPP_IMAGE
+  stage: lint
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "clang-tidy"
+    STEP_ENABLE: "$LINT_CPP_CLANG_TIDY_ENABLE"
+    STEP_FILE_GLOB: '\.(c|cc|cpp|cxx|h|hpp)$'
+  before_script:
+    - export LC_ALL="$CI_LOCALE"; export LANG="$CI_LOCALE"
+    - !reference [.get-changed-files, before_script]
+  script:
+    - !reference [.skip-if-disabled, script]
+    - |
+      if [ -n "$LINT_CPP_CLANG_TIDY_TARGET" ]; then
+        FILES="$LINT_CPP_CLANG_TIDY_TARGET"
+      else
+        FILES=$(echo "$CI_CHANGED_FILES" | grep -E '\.(c|cc|cpp|cxx|h|hpp)$' || true)
+      fi
+      if [ -z "$FILES" ]; then
+        echo "[skip] clang-tidy：无匹配的 C/C++ 文件"; exit 0
+      fi
+      # 无项目 .clang-tidy 配置且未显式指定 LINT_CPP_CLANG_TIDY_CONFIG 时跳过。
+      if [ -z "$LINT_CPP_CLANG_TIDY_CONFIG" ] && [ ! -f .clang-tidy ]; then
+        echo "[skip] clang-tidy：未发现项目 .clang-tidy 配置，跳过检查"; exit 0
+      fi
+      P_ARG=""
+      [ -n "$LINT_CPP_CLANG_TIDY_COMPILE_COMMANDS_DIR" ] && [ -f "$LINT_CPP_CLANG_TIDY_COMPILE_COMMANDS_DIR/compile_commands.json" ] && P_ARG="-p $LINT_CPP_CLANG_TIDY_COMPILE_COMMANDS_DIR"
+      CFG_ARG=""
+      [ -n "$LINT_CPP_CLANG_TIDY_CONFIG" ] && [ -f "$LINT_CPP_CLANG_TIDY_CONFIG" ] && CFG_ARG="--config-file=$LINT_CPP_CLANG_TIDY_CONFIG"
+      echo "$FILES" | xargs clang-tidy $P_ARG $CFG_ARG $LINT_CPP_CLANG_TIDY_EXTRA_ARGS 2>&1 | tee "$LINT_CPP_CLANG_TIDY_REPORT_FILE"
+  artifacts:
+    when: always
+    paths:
+      - $LINT_CPP_CLANG_TIDY_REPORT_FILE
+    expire_in: "7 days"
+
+# cppcheck 静态分析。镜像 ENTRYPOINT 是 cppcheck，这里清空 entrypoint，由 shell 执行 script。
+.cppcheck:
+  extends: .base-job
+  image:
+    name: $LINT_CPP_CPPCHECK_IMAGE
+    entrypoint: [""]
+  stage: lint
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "cppcheck"
+    STEP_ENABLE: "$LINT_CPP_CPPCHECK_ENABLE"
+  script:
+    - !reference [.skip-if-disabled, script]
+    - |
+      SUPP_ARG=""
+      [ -n "$LINT_CPP_CPPCHECK_SUPPRESS" ] && SUPP_ARG="--suppress=$LINT_CPP_CPPCHECK_SUPPRESS"
+      if [ -n "$LINT_CPP_CPPCHECK_PROJECT" ] && [ -f "$LINT_CPP_CPPCHECK_PROJECT" ]; then
+        echo "==> cppcheck --project=$LINT_CPP_CPPCHECK_PROJECT --enable=$LINT_CPP_CPPCHECK_ENABLE_LEVEL"
+        cppcheck --project="$LINT_CPP_CPPCHECK_PROJECT" --enable="$LINT_CPP_CPPCHECK_ENABLE_LEVEL" $SUPP_ARG $LINT_CPP_CPPCHECK_EXTRA_ARGS --xml 2> "$LINT_CPP_CPPCHECK_REPORT_FILE"
+      else
+        echo "==> cppcheck $LINT_CPP_CPPCHECK_TARGET --enable=$LINT_CPP_CPPCHECK_ENABLE_LEVEL"
+        cppcheck "$LINT_CPP_CPPCHECK_TARGET" --enable="$LINT_CPP_CPPCHECK_ENABLE_LEVEL" $SUPP_ARG $LINT_CPP_CPPCHECK_EXTRA_ARGS --xml 2> "$LINT_CPP_CPPCHECK_REPORT_FILE"
+      fi
+      echo "==== cppcheck report ===="
+      cat "$LINT_CPP_CPPCHECK_REPORT_FILE" || true
+  artifacts:
+    when: always
+    paths:
+      - $LINT_CPP_CPPCHECK_REPORT_FILE
+    expire_in: "7 days"
+
+# 原子能力：clang-format 代码格式化检查（不修改代码，仅检查）
+.clang-format:
+  extends: .base-job
+  image: $LINT_CPP_IMAGE
+  stage: lint
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "clang-format"
+    STEP_ENABLE: "$LINT_CPP_CLANG_FORMAT_ENABLE"
+  before_script:
+    - export LC_ALL="$CI_LOCALE"; export LANG="$CI_LOCALE"
+    - !reference [.get-changed-files, before_script]
+  script:
+    - !reference [.skip-if-disabled, script]
+    - |
+      FILES=$(echo "$CI_CHANGED_FILES" | grep -E '\.(c|cc|cpp|cxx|h|hpp)$' || true)
+      if [ -z "$FILES" ]; then
+        echo "[skip] clang-format：无匹配的 C/C++ 文件"; exit 0
+      fi
+      # -style=file（默认）且项目无 .clang-format 时跳过；显式指定 Google/LLVM 等内置风格则不需要 .clang-format。
+      if [ "$LINT_CPP_CLANG_FORMAT_STYLE" = "file" ] && [ ! -f .clang-format ]; then
+        echo "[skip] clang-format：未发现项目 .clang-format 配置，跳过检查"; exit 0
+      fi
+      STYLE_ARG="-style=$LINT_CPP_CLANG_FORMAT_STYLE"
+      STRICT_ARG=""
+      [ "$LINT_CPP_CLANG_FORMAT_STRICT" = "true" ] && STRICT_ARG="--dry-run --Werror" || STRICT_ARG="--dry-run"
+      RC=0
+      for f in $FILES; do
+        [ -f "$f" ] || continue
+        clang-format $STYLE_ARG $STRICT_ARG "$f" || RC=1
+      done
+      if [ "$RC" != "0" ] && [ "$LINT_CPP_CLANG_FORMAT_STRICT" = "true" ]; then
+        echo "clang-format 检查失败：请使用 'clang-format -i' 修复"; exit 1
+      fi

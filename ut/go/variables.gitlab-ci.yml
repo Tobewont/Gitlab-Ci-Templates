@@ -1,0 +1,15 @@
+variables:
+  # [用户可配] Go 测试执行镜像（建议与业务侧 golang 版本对齐）
+  UT_GO_IMAGE: "registry.example.com/library/golang:1.23"
+  # [用户可配] 单元测试开关
+  UT_GO_ENABLE: "true"
+  # [用户可配] 测试目标（默认 ./...）
+  UT_GO_TARGET: "./..."
+  # [用户可配] 覆盖率文件输出路径（留空则不产出）
+  UT_GO_COVERAGE_FILE: "coverage.out"
+  # [用户可配] 覆盖率模式（set / count / atomic）
+  UT_GO_COVERAGE_MODE: "atomic"
+  # [用户可配] 额外 go test 参数
+  UT_GO_EXTRA_ARGS: "-race -v"
+  # [用户可配] GOPROXY（留空 + USE_CHINA_MIRROR=true → goproxy.cn; false → proxy.golang.org）
+  UT_GO_GOPROXY: ""

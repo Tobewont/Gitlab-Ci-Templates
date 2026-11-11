@@ -1,0 +1,6 @@
+variables:
+  # ── 飞书自定义机器人（.notify / .notify-feishu 使用）──────────
+  # [用户可配] 飞书群机器人 Webhook URL（在群设置中添加自定义机器人后获得；CI/CD Variables masked 注入）
+  NOTIFY_FEISHU_WEBHOOK_URL: ""
+  # [用户可配] 飞书机器人签名密钥（可选，安全设置选「签名校验」时填写）
+  NOTIFY_FEISHU_SIGN_SECRET: ""

@@ -1,0 +1,10 @@
+# 场景文案：部署
+#   附加行展示部署环境
+.notify-msg-deploy:
+  script:
+    - |
+      if [ "${NOTIFY_SCENARIO:-pipeline}" = "deploy" ]; then
+        _SCN="部署"
+        _EXTRA="\n【环境】\${CI_ENVIRONMENT_NAME:-N/A}"
+        export _SCN _EXTRA
+      fi

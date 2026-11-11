@@ -1,0 +1,15 @@
+variables:
+  # [用户可配] protoc 执行镜像
+  BUILD_PROTOC_IMAGE: "registry.example.com/cicd/protoc:v1.0"
+  # [用户可配] protoc 生成开关
+  BUILD_PROTOC_ENABLE: "true"
+  # [用户可配] proto 文件所在目录
+  BUILD_PROTOC_SRC_DIR: "proto"
+  # [用户可配] 生成语言（go / java / python / cpp / js / ts；多个用逗号分隔）
+  BUILD_PROTOC_LANGUAGES: "go"
+  # [用户可配] 生成产物输出目录
+  BUILD_PROTOC_OUT_DIR: "generated"
+  # [用户可配] 额外的 -I 引用路径（多个用逗号分隔）
+  BUILD_PROTOC_INCLUDE_DIRS: ""
+  # [用户可配] 额外 protoc 参数
+  BUILD_PROTOC_EXTRA_ARGS: ""

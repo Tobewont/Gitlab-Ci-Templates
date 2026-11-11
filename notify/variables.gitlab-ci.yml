@@ -1,0 +1,81 @@
+variables:
+  # ── 跨渠道共享 ────────────────────────────────────────────────
+  # [用户可配] 查询 pipeline / job 的 GitLab API token。默认 GITLAB_TOKEN
+  NOTIFY_GITLAB_TOKEN: "$GITLAB_TOKEN"
+  # [用户可配] 是否启用通知（所有渠道的总开关）
+  NOTIFY_ENABLE: "true"
+  # [用户可配] 通知渠道（.notify 聚合入口用；.notify-<channel> 独立能力不看此变量）
+  #   可选值：feishu / wework / dingtalk / webhook
+  #   支持单选（"feishu"）或多选（逗号分隔，如 "feishu,wework"）
+  #   多选时按顺序串行发送，某渠道失败不影响其他渠道继续发
+  #   四个渠道都是机器人 webhook 直连，地址在各渠道 variables 中配置
+  NOTIFY_CHANNEL: "feishu"
+
+  # ── 场景与消息模板 ────────────────────────────────────────────
+  # [用户可配] 通知场景（决定默认标题/消息文案）
+  #   pipeline (默认) / build / deploy / scan / review / compliance / smoke
+  #   业务侧一行覆盖 NOTIFY_SCENARIO 即可切换到合适的默认文案
+  NOTIFY_SCENARIO: "pipeline"
+
+  # [用户可配] 自定义标题模板（非空则覆盖 NOTIFY_SCENARIO 的默认标题）
+  #   支持 $EMOJI / $STATE / $STATUS 及任意 GitLab CI 变量
+  NOTIFY_TITLE_TEMPLATE: ""
+  # [用户可配] 自定义消息模板（非空则覆盖 NOTIFY_SCENARIO 的默认消息）
+  #   多行文本，\n 表示换行；支持任意变量与 $STATUS / $EMOJI / $STATE
+  NOTIFY_MSG_TEMPLATE: ""
+
+  # ── 状态来源（多点通知场景） ────────────────────────────────
+  # [用户可配] 状态查询来源
+  #   pipeline (默认): 查整个 pipeline 状态 (末尾通知场景)
+  #   job:            查 NOTIFY_UPSTREAM_JOB 指定 job 的状态 (中间 stage 通知)
+  NOTIFY_STATUS_SOURCE: "pipeline"
+  # [用户可配] STATUS_SOURCE=job 时的上游 job 名 (business 侧 job 名, 非 hidden job)
+  #   典型用法配合 needs: [my-sonar] + NOTIFY_UPSTREAM_JOB: "my-sonar"
+  NOTIFY_UPSTREAM_JOB: ""
+
+  # [用户可配] 显式状态覆盖（优先级最高：> CI_JOB_STATUS > .notify-status 文件）
+  #   业务侧根据自己逻辑判定后直接传 "success" / "failed" / "canceled" / "skipped"
+  #   或者：在 script 尾部 `echo success > .notify-status`(或 failed)，
+  #   .notify-inline 在 CI_JOB_STATUS 拿不到最终态时读取该文件
+  NOTIFY_STATUS_OVERRIDE: ""
+
+  # ── pipeline 聚合状态：排除收尾类 job，避免误报 ──────────────
+  # [用户可配] pipeline 聚合判定时要排除的“收尾类” job 名正则（Python re.match）。
+  #   notify 与 mr-verdict/scan-summary 常同处收尾阶段并发；聚合状态时若把这些尚在
+  #   running 的收尾 job 计入，会把整体误判为 running 进而误报“失败”。默认排除 notify*/
+  #   mr-verdict/scan-summary*；失败/取消只看被排除后的“实质”job。业务可覆盖扩展。
+  NOTIFY_EXCLUDE_JOBS_REGEX: "^(notify.*|mr-verdict|scan-summary.*)$"
+  # [用户可配] 聚合仍为 running 时，有界轮询等实质 job 收敛到终态的最大次数与间隔(秒)。
+  #   轮询结束仍只有收尾 job 在跑、且没有失败或取消时，状态记为成功。
+  NOTIFY_WAIT_TERMINAL_RETRIES: "6"
+  NOTIFY_WAIT_TERMINAL_INTERVAL: "3"
+  # ── 预告通知（.notify-preheat / .notify-restart-notice）────────────
+  # 文案用独立变量。发送仍走各渠道 webhook（与 .notify 相同的 URL）。
+  # [用户可配] 开关
+  NOTIFY_PREHEAT_ENABLE: "true"
+  # [用户可配] 预告正文；留空时按「服务重启」场景用下面的 NOTIFY_RESTART_* 自动组装
+  NOTIFY_PREHEAT_TEXT: ""
+  # [用户可配] 追加到正文末尾的补充说明（换行拼接）
+  NOTIFY_PREHEAT_EXTRA_TEXT: ""
+  # [用户可配] 通知标题；留空为「<服务名> 重启预告」
+  NOTIFY_PREHEAT_TITLE: ""
+  # [用户可配] 环境文案（测试环境 / 预发环境 / 生产环境）
+  NOTIFY_PREHEAT_ENV_TEXT: "测试环境"
+  # [用户可配] 预告渠道：feishu / wework / dingtalk / webhook，可逗号多选
+  NOTIFY_PREHEAT_CHANNEL: "feishu"
+  # [用户可配] 预告文案中的服务组；留空则文案不含服务组
+  NOTIFY_PREHEAT_SVRGROUP: ""
+  # [用户可配] true 时任一渠道失败即 job 失败；默认 best-effort 不阻塞发布
+  NOTIFY_PREHEAT_STRICT: "false"
+
+  # ── 「服务重启」场景的文案参数（NOTIFY_PREHEAT_TEXT 为空时生效）──
+  # [用户可配] 服务名；留空回退 CI_PROJECT_NAME
+  NOTIFY_RESTART_SERVICE: ""
+  # [用户可配] 提前多少分钟播报（正整数）
+  NOTIFY_RESTART_LEAD_MINUTES: "5"
+  # [用户可配] 版本号；留空且未配源码宏时，文案不含版本
+  NOTIFY_RESTART_VERSION: ""
+  # [用户可配] 版本号兜底：从源码宏文件解析。仅当 NOTIFY_RESTART_VERSION 为空时生效。
+  #   例：MACRO_FILE="include/version.h" / MACRO_VERSION="APP_VERSION"
+  NOTIFY_PREHEAT_MACRO_FILE: ""
+  NOTIFY_PREHEAT_MACRO_VERSION: ""

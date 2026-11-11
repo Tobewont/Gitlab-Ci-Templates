@@ -1,0 +1,17 @@
+variables:
+  # [用户可配] 执行镜像
+  DEPLOY_CD_IMAGE: "$CI_BASE_IMAGE"
+  # [用户可配] 部署开关
+  DEPLOY_CD_ENABLE: "true"
+  # [用户可配] CD 平台 API URL。默认 ${CD_PLATFORM_URL}${CD_DEPLOY_API_PATH}
+  DEPLOY_CD_URL: "${CD_PLATFORM_URL}${CD_DEPLOY_API_PATH}"
+  # [用户可配] 认证 Token（由业务侧在自己仓库的 CI/CD Variables masked 注入）
+  DEPLOY_CD_TOKEN: ""
+  # [用户可配] 认证头名称。头的值是 DEPLOY_CD_TOKEN 原文；Bearer 认证时把 token 写成 "Bearer <token>"
+  DEPLOY_CD_TOKEN_HEADER: "Authorization"
+  # [用户可配] 请求体（JSON 字符串；支持变量插值）
+  # 例：'{"name":"$CI_PROJECT_NAME","environment":"prod","ref":"$CI_COMMIT_REF_NAME"}'
+  DEPLOY_CD_BODY: ""
+  # [用户可配] 期望响应中标记成功的 JSON 字段与值（如 code=0 / status=success；留空则按 HTTP 2xx 判断）
+  DEPLOY_CD_SUCCESS_FIELD: ""
+  DEPLOY_CD_SUCCESS_VALUE: ""

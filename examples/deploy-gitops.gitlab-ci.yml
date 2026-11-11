@@ -1,0 +1,74 @@
+workflow:
+  # CI 配置防合并覆盖前提：MR 事件必须产生 MR 流水线（guard 仅存在于 MR 流水线）；
+  #   分支有打开 MR 时去重分支流水线（保护卡在 MR 流水线，绕过分支流水线也无法合入）
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+# 完整现代 CI/CD 链路：构建 → 推送镜像 → GitOps 部署
+# Argo CD / Flux 监听 GitOps 仓，本 pipeline 只负责把新镜像 tag 写进 K8s manifest
+include:
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'build/docker/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'upload/harbor/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'deploy/gitops/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'notify/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'checks/jobs.gitlab-ci.yml'
+
+stages:
+  - build
+  - upload
+  - deploy
+  - notify
+
+variables:
+  # ── 统一业务变量（只改此区）
+  APP_IMAGE_NAME: "myapp/go-service"
+
+  # ── Docker / Harbor 能力变量
+  BUILD_DOCKER_IMAGE_NAME: "$APP_IMAGE_NAME"
+  UPLOAD_HARBOR_IMAGE_NAME: "$APP_IMAGE_NAME"
+
+  # ── GitOps 部署能力变量
+  # GitOps 仓（DEPLOY_GITOPS_TOKEN 通过 CI/CD Variables 注入）
+  DEPLOY_GITOPS_REPO_URL: "https://git.example.com/gitops/prod.git"
+  DEPLOY_GITOPS_BRANCH: "main"
+  DEPLOY_GITOPS_YAML_FILE: "apps/myapp/deployment.yaml"
+  DEPLOY_GITOPS_IMAGE_FIELD: ".spec.template.spec.containers[0].image"
+  # 新镜像引用（tag 来自 build 阶段实际使用的 CI_COMMIT_REF_SLUG）
+  DEPLOY_GITOPS_NEW_IMAGE: "registry.example.com/${BUILD_DOCKER_IMAGE_NAME}:${CI_COMMIT_REF_SLUG}"
+
+my-docker-build:
+  extends: .docker-build
+
+my-harbor-push:
+  extends: .harbor-push
+  needs:
+    - my-docker-build
+
+my-gitops-deploy:
+  extends: .deploy-gitops
+  needs:
+    - my-harbor-push
+
+my-notify:
+  extends: .notify
+  needs:
+    - my-gitops-deploy
+
+# CI 配置防合并覆盖：MR 源分支改动 .gitlab-ci.yml 则 guard 失败、卡死合并（.pre 阶段，先于所有 job；guard 失败则后续 job 全部不启动）
+#   默认启用（CHECKS_CI_CONFIG_GUARD_ENABLE: "true"）；显式设为 "false" 则 guard job 不创建、不作其它 job 前提（needs optional 自动豁免，零等待）
+#   guard 仅在 MR 流水线存在（模板 rules 限定），故上方 workflow rules 必须放行 merge_request_event
+ci-config-guard:
+  extends: .ci-config-guard

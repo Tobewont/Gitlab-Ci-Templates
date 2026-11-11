@@ -1,0 +1,11 @@
+variables:
+  ARCHIVE_UNPACK_IMAGE: "$CI_BASE_IMAGE"
+  ARCHIVE_UNPACK_ENABLE: "true"
+  # 待解包文件，空格分隔；格式按后缀自动识别
+  ARCHIVE_UNPACK_PATHS: ""
+  # 解包目标目录
+  ARCHIVE_UNPACK_DEST: "."
+  # 剥离的路径层数（去掉归档内顶层目录时用 1）
+  ARCHIVE_UNPACK_STRIP: "0"
+  # 解包后删除源归档文件
+  ARCHIVE_UNPACK_REMOVE_SOURCE: "false"

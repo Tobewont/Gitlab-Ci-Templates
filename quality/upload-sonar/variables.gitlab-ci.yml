@@ -1,0 +1,11 @@
+variables:
+  # [用户可配] upload-sonar 执行镜像
+  QUALITY_UPLOAD_SONAR_IMAGE: "$CI_BASE_IMAGE"
+  # [用户可配] upload-sonar 开关
+  QUALITY_UPLOAD_SONAR_ENABLE: "true"
+
+  # [用户可配] 输入报告清单，形如 "pylint:pylint-report.txt,eslint:eslint-report.json,clangtidy:clang-tidy-report.txt,golangci:golangci-report.json,cppcheck:cppcheck-report.xml,phpstan:reports/phpstan.json,luacheck:luacheck-report.json,revive:revive-report.xml,checkstyle:checkstyle-report.xml,trivy:trivy.json,gitleaks:gitleaks.json,semgrep:semgrep.json"
+  # 前缀是工具类型（决定解析器），冒号后是本地路径
+  QUALITY_UPLOAD_SONAR_INPUTS: ""
+  # [用户可配] 输出的 Sonar externalIssues 汇总文件
+  QUALITY_UPLOAD_SONAR_OUTPUT: "sonar-external-issues.json"

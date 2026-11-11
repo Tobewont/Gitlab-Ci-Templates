@@ -1,0 +1,44 @@
+variables:
+  # [用户可配] Docker CLI 镜像（默认走 k8s runner 挂载的 /var/run/docker.sock）
+  BUILD_DOCKER_IMAGE: "$CI_BASE_IMAGE"
+  # [用户可配] Docker 构建开关
+  BUILD_DOCKER_ENABLE: "true"
+
+  # ── 镜像仓库 ────────────────────────────────────────────
+  # [用户可配] 目标 registry（不含协议和末尾斜杠）
+  BUILD_DOCKER_REGISTRY: "registry.example.com"
+
+  # ── 镜像信息 ─────────────────────────────────────────────────
+  # [用户可配] 镜像名（不含 registry 前缀，如 myapp/go-service）
+  BUILD_DOCKER_IMAGE_NAME: ""
+  # [用户可配] 镜像 tag。留空则按优先级自动选：
+  #   1. $CI_COMMIT_TAG                     —— tag push 场景（如 v1.2.3）
+  #   2. commit message 里的 "build vX.Y.Z" —— 需 BUILD_DOCKER_PARSE_COMMIT_VERSION=true
+  #   3. $CI_COMMIT_SHORT_SHA               —— 普通 push 场景（commit id 前 8 位）
+  BUILD_DOCKER_IMAGE_TAG: ""
+  # [用户可配] 是否解析 commit message 中的 "build vX.Y.Z" 作为 tag（默认关闭）
+  BUILD_DOCKER_PARSE_COMMIT_VERSION: "false"
+  # [用户可配] 构建上下文
+  BUILD_DOCKER_CONTEXT: "."
+  # [用户可配] Dockerfile 相对 BUILD_DOCKER_CONTEXT 的路径
+  BUILD_DOCKER_FILE: "Dockerfile"
+  # [用户可配] 额外 --build-arg 参数（如 "--build-arg VER=1.0 --build-arg ENV=prod"）
+  BUILD_DOCKER_BUILD_ARGS: ""
+  # [用户可配] 额外 docker build 参数（如 --no-cache --pull）
+  BUILD_DOCKER_EXTRA_ARGS: ""
+
+  # ── AUTO_PUSH：build 完立即在同一 pod 内推送（推荐）─────────────
+  # k8s runner 多节点场景下，独立 push job 可能落在不同 node，看不到本地镜像。
+  # 开启 AUTO_PUSH=true 可在同一 pod 内 build → login → push，避免跨 pod daemon 隔离。
+  # [用户可配] 构建后是否立即推送（默认 false，只 build）
+  BUILD_DOCKER_AUTO_PUSH: "false"
+  # [用户可配] AUTO_PUSH=true 时是否额外推 :latest tag
+  BUILD_DOCKER_PUSH_LATEST: "false"
+
+  # ── 镜像仓库凭据 ──────────────────────────────────────────
+  # 在 GitLab CI/CD Variables 中 masked 注入，与 upload/harbor 共用。
+  HARBOR_USERNAME: ""
+  HARBOR_PASSWORD: ""
+
+  # ── dind 变体专用：dind service 镜像 ─────────────────────────
+  BUILD_DOCKER_DIND_IMAGE: "registry.example.com/library/docker:24-dind"

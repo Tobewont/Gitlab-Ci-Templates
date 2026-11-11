@@ -1,0 +1,103 @@
+variables:
+  # ── 公共 ────────────────────────────────────────────────────
+  # [用户可配] 活跃工程扫描总开关
+  SCAN_ACTIVE_ENABLE: "true"
+  # [用户可配] 活跃窗口天数（默认 7 天；discover 与 scan 共用同一窗口语义）
+  SCAN_ACTIVE_WINDOW_DAYS: "7"
+  # [内部] 活跃工程/分支清单（discover 产出 → scan 消费，经 artifacts 传递）
+  SCAN_ACTIVE_MANIFEST_FILE: "active-repos.json"
+
+  # ── .active-repos-discover（发现活跃工程与活跃分支）──────────
+  # [用户可配] discover 执行镜像（需 python3 + curl，ci-base 已内置）
+  SCAN_ACTIVE_DISCOVER_IMAGE: "$CI_BASE_IMAGE"
+  # [用户可配] 扫描范围：逗号分隔的 group path 或 group id
+  #   留空 = 全局扫描（token 可见的所有工程，走 GET /projects）
+  #   指定 = 仅扫这些 group（含子 group），如 "my-group" 或 "my-group/devops,88"
+  SCAN_ACTIVE_GROUPS: ""
+  # [用户可配] 全局扫描（GROUPS 留空）时是否只看自己是成员的工程
+  #   true  = membership=true，只扫自己有权限参与的工程（推荐，范围更聚焦）
+  #   false = token 可见的全部工程（含公开/内部可见但非成员的仓库）
+  SCAN_ACTIVE_MEMBERSHIP_ONLY: "false"
+  # [用户可配] 是否递归包含子 group
+  SCAN_ACTIVE_INCLUDE_SUBGROUPS: "true"
+  # [用户可配] 工程白名单正则（匹配 path_with_namespace，留空=不限制）
+  SCAN_ACTIVE_PROJECT_INCLUDE: ""
+  # [用户可配] 工程黑名单正则（匹配 path_with_namespace，优先级高于白名单）
+  SCAN_ACTIVE_PROJECT_EXCLUDE: ""
+  # [用户可配] 取窗口内最活跃的前 N 个工程；0（默认）= 窗口内所有活跃工程
+  #   工程活跃度 = 该工程窗口内提交数最多的那个分支的提交数；
+  #   并列时按最后活动时间更新者优先。设为正整数即按此择优截断。
+  SCAN_ACTIVE_PROJECT_TOP_N: "0"
+  # [用户可配] 分支白名单正则（留空=所有分支参与活跃度比较），如 "^(main|master|test|release.*)$"
+  SCAN_ACTIVE_BRANCH_INCLUDE: ""
+  # [用户可配] 分支黑名单正则（优先级高于白名单）
+  SCAN_ACTIVE_BRANCH_EXCLUDE: ""
+  # [用户可配] 活跃分支判定策略：
+  #   most-commits    按 SCAN_ACTIVE_BRANCH_TOP_N 语义选分支（默认分支 + 最活跃分支）
+  #   default-branch  固定只取默认分支（等价于 BRANCH_TOP_N=1；仍要求窗口内有提交）
+  SCAN_ACTIVE_BRANCH_STRATEGY: "most-commits"
+  # [用户可配] 每个工程取几个分支（默认 1）。语义：
+  #   1  = 只取默认分支（要求默认分支窗口内有提交）
+  #   0  = 取该工程窗口内所有活跃分支（不限个数）
+  #   N>1 = 默认分支 + 其余分支中最活跃的 (N-1) 个（共最多 N 个）
+  #   默认分支窗口内无提交时不占名额，此时 N>1 取最活跃的 (N-1) 个、1 则该工程整体跳过。
+  #   同一工程的多个分支各自独立 clone、独立执行、独立计入汇总，彼此失败互不影响；
+  #   实际取到的分支数受窗口内有提交的分支数限制（不足就取实际数量）。
+  #   仅 SCAN_ACTIVE_BRANCH_STRATEGY=most-commits 时有效。
+  SCAN_ACTIVE_BRANCH_TOP_N: "1"
+  # [用户可配] 候选工程数硬上限（安全阀，防一次拉爆 API；按 last_activity_at 倒序截断）
+  #   与 SCAN_ACTIVE_PROJECT_TOP_N 的区别：本项是**拉取阶段**的粗筛上限（按最后活动时间），
+  #   PROJECT_TOP_N 是**统计完提交数后**的择优截断（按实际提交数）。两者可同时生效。
+  SCAN_ACTIVE_MAX_PROJECTS: "200"
+  # [用户可配] 单工程参与比较的候选分支数上限（先按分支最后提交时间倒序取前 N）
+  SCAN_ACTIVE_MAX_BRANCHES_PER_PROJECT: "50"
+  # [用户可配] GitLab API 并发数（只读 GET，默认 8）
+  SCAN_ACTIVE_API_WORKERS: "8"
+  # [用户可配] GitLab API Token（只需 read_api；默认复用 base 层全局 GITLAB_TOKEN）
+  SCAN_ACTIVE_API_TOKEN: "$GITLAB_TOKEN"
+
+  # ── .active-repos-scan（逐工程 clone + 执行 npx）─────────────
+  # [用户可配] scan 执行镜像（需 node/npm/npx + git）
+  SCAN_ACTIVE_SCAN_IMAGE: "registry.example.com/library/node:24.12.0"
+  # [用户可配] 在每个工程根目录执行的命令（必填），如 "npx -y eslint ."
+  #   扫描规则由该命令自身实现，本能力不感知
+  SCAN_ACTIVE_NPX_CMD: ""
+  # [用户可配] 预热命令（只在 job 开头执行一次，把 npx 包下载进共享缓存，避免每个工程重复下载）
+  #   留空=不预热；示例 "npx -y eslint --version"
+  SCAN_ACTIVE_NPX_PREWARM_CMD: ""
+  # [用户可配] npm 镜像源（留空=保持镜像/项目默认）
+  SCAN_ACTIVE_NPM_REGISTRY: "https://registry.npmmirror.com"
+  # [用户可配] npm/npx 共享缓存目录（相对 CI_PROJECT_DIR；所有工程复用，配合预热省下重复下载）
+  SCAN_ACTIVE_NPM_CACHE_DIR: ".npm-cache"
+  # [用户可配] 克隆深度（1=浅克隆；扫描需要 git 历史时设 0=全量）
+  #   SCAN_ACTIVE_CLONE_SHALLOW_SINCE 非空时不使用本项
+  SCAN_ACTIVE_CLONE_DEPTH: "1"
+  # [用户可配] 按时间浅克隆（git clone --shallow-since）。空=不启用
+  #   非空时只传 --shallow-since，保留该时间之后的提交，不再传 --depth
+  #   例：2026-10-15、2026-10-15T00:00:00+08:00
+  SCAN_ACTIVE_CLONE_SHALLOW_SINCE: ""
+  # [用户可配] 克隆时是否递归检出子模块（git clone --recurse-submodules）
+  #   true=启用；false（默认）=不传该参数
+  SCAN_ACTIVE_CLONE_RECURSE_SUBMODULES: "false"
+  # [用户可配] 克隆认证用户名（默认复用 base 层全局 GITLAB_USERNAME，即 oauth2）
+  SCAN_ACTIVE_CLONE_USERNAME: "$GITLAB_USERNAME"
+  # [用户可配] 克隆认证 Token（需 read_repository；默认复用 base 层全局 GITLAB_TOKEN）
+  SCAN_ACTIVE_CLONE_TOKEN: "$GITLAB_TOKEN"
+  # [用户可配] 各工程代码检出的父目录（相对 CI_PROJECT_DIR，job 结束前逐个清理）
+  SCAN_ACTIVE_WORKDIR: ".scan-workspace"
+  # [用户可配] 单工程执行超时秒数（含 clone + npx；超时记 exit=124 继续下一个）
+  SCAN_ACTIVE_TIMEOUT_SECONDS: "1800"
+  # [用户可配] 并发处理的工程数（默认 1 串行，日志最清晰；调大则按批并发）
+  SCAN_ACTIVE_CONCURRENCY: "1"
+  # [用户可配] 是否保留各工程检出目录（排障用，默认跑完即删以省磁盘）
+  SCAN_ACTIVE_KEEP_WORKDIR: "false"
+  # [用户可配] 工程间失败隔离后的 job 最终态：
+  #   false（默认）任一工程失败也不影响 job 成功，只在最后打印汇总日志做记录
+  #   true         存在失败工程则 job 失败（需要卡点时开启）
+  SCAN_ACTIVE_FAIL_ON_ERROR: "false"
+  # [用户可配] 汇总时为失败工程回显的日志尾部行数（0=不回显）
+  SCAN_ACTIVE_FAIL_LOG_TAIL: "30"
+  # [内部] 各工程执行日志目录（artifacts 保留，便于事后追溯）
+  SCAN_ACTIVE_LOG_DIR: "scan-logs"
+  # [内部] 扫描结果汇总 JSON
+  SCAN_ACTIVE_RESULT_FILE: "active-repos-scan-result.json"

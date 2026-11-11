@@ -1,0 +1,10 @@
+variables:
+  # ── .git-comment（mr / commit 通用评论）───────────────────────
+  # [用户可配] GitLab API token。默认 GITLAB_TOKEN
+  GIT_COMMENT_TOKEN: "$GITLAB_TOKEN"
+  # [用户可配] 评论目标：mr（默认）/ commit
+  GIT_COMMENT_TARGET: "mr"
+  # [用户可配] 评论内容（支持 \n 换行）；动态文案改用 GIT_COMMENT_BODY_FILE
+  GIT_COMMENT_BODY: ""
+  # [用户可配] 评论内容文件（优先级高于 GIT_COMMENT_BODY，默认 .git-comment-body）
+  GIT_COMMENT_BODY_FILE: ".git-comment-body"

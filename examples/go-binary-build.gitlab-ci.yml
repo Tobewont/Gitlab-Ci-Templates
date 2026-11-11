@@ -1,0 +1,84 @@
+workflow:
+  # CI 配置防合并覆盖前提：MR 事件必须产生 MR 流水线（guard 仅存在于 MR 流水线）；
+  #   分支有打开 MR 时去重分支流水线（保护卡在 MR 流水线，绕过分支流水线也无法合入）
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+# Go 二进制构建 → 上传到 GitLab Package Registry → 通知
+include:
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'common/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'git/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'build/go/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'upload/package/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'notify/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'checks/jobs.gitlab-ci.yml'
+
+stages:
+  - prepare
+  - build
+  - upload
+  - notify
+
+variables:
+  # ── 统一业务变量（只改此区）
+  APP_ARTIFACT_DIR: "dist"
+
+  # ── Go 构建变量
+  BUILD_GO_PLATFORMS: "linux/amd64,linux/arm64"
+  BUILD_GO_EXTRA_ARGS: "-tags=timetzdata"
+  BUILD_GO_OUTPUT_DIR: "$APP_ARTIFACT_DIR"
+
+  # ── GitLab Package Registry 上传变量
+  UPLOAD_PACKAGE_NAME: "$CI_PROJECT_NAME"
+  UPLOAD_PACKAGE_VERSION: "$CI_APP_VERSION"     # 由 .git-describe 生成
+
+my-version:
+  extends: .git-describe
+  stage: prepare
+
+my-go-build:
+  extends: .go-build
+  needs:
+    - my-version
+  # BUILD_GO_VERSION 留空 → 自动使用 my-version 通过 dotenv 传入的 CI_APP_VERSION
+
+my-upload-linux-amd64:
+  extends: .package-upload
+  needs:
+    - my-go-build
+  variables:
+    UPLOAD_PACKAGE_LOCAL_PATH: "${APP_ARTIFACT_DIR}/${CI_PROJECT_NAME}-linux-amd64"
+
+my-upload-linux-arm64:
+  extends: .package-upload
+  needs:
+    - my-go-build
+  variables:
+    UPLOAD_PACKAGE_LOCAL_PATH: "${APP_ARTIFACT_DIR}/${CI_PROJECT_NAME}-linux-arm64"
+
+my-notify:
+  extends: .notify
+  needs:
+    - my-upload-linux-amd64
+    - my-upload-linux-arm64
+
+# CI 配置防合并覆盖：MR 源分支改动 .gitlab-ci.yml 则 guard 失败、卡死合并（.pre 阶段，先于所有 job；guard 失败则后续 job 全部不启动）
+#   默认启用（CHECKS_CI_CONFIG_GUARD_ENABLE: "true"）；显式设为 "false" 则 guard job 不创建、不作其它 job 前提（needs optional 自动豁免，零等待）
+#   guard 仅在 MR 流水线存在（模板 rules 限定），故上方 workflow rules 必须放行 merge_request_event
+ci-config-guard:
+  extends: .ci-config-guard

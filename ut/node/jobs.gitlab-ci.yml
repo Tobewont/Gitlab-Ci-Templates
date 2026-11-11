@@ -1,0 +1,53 @@
+# 原子能力：Node/前端 单元测试（npm / yarn / pnpm）
+# 支持：配镜像源、按包管理器装依赖、Node 内存上限、可选 junit 报告。
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/ut/node/variables.gitlab-ci.yml'
+
+stages:
+  - ut
+
+.node-ut:
+  extends: .base-job
+  image: $UT_NODE_IMAGE
+  stage: ut
+  variables:
+    STEP_NAME: "Node Unit Test"
+    STEP_ENABLE: "$UT_NODE_ENABLE"
+  script:
+    - !reference [.skip-if-disabled, script]
+    - |
+      set -eu
+      export LC_ALL=C.UTF-8; export LANG=C.UTF-8
+      export NODE_OPTIONS="--max_old_space_size=$UT_NODE_MAX_OLD_SPACE_MB"
+
+      # ── 依赖安装 ──
+      if [ "$UT_NODE_INSTALL" = "true" ]; then
+        case "$UT_NODE_PKG_MANAGER" in
+          yarn)
+            [ -n "$UT_NODE_REGISTRY" ] && yarn config set registry "$UT_NODE_REGISTRY"
+            yarn install $UT_NODE_INSTALL_ARGS
+            ;;
+          pnpm)
+            [ -n "$UT_NODE_REGISTRY" ] && pnpm config set registry "$UT_NODE_REGISTRY"
+            pnpm install $UT_NODE_INSTALL_ARGS
+            ;;
+          npm|*)
+            [ -n "$UT_NODE_REGISTRY" ] && npm config set registry "$UT_NODE_REGISTRY"
+            npm install $UT_NODE_INSTALL_ARGS
+            ;;
+        esac
+      fi
+
+      # ── 执行测试 ──
+      $UT_NODE_TEST_CMD
+  artifacts:
+    when: always
+    paths:
+      - $UT_NODE_JUNIT_REPORT
+    reports:
+      junit: $UT_NODE_JUNIT_REPORT
+    expire_in: "7 days"
+    exclude:
+      - "**/node_modules/**"

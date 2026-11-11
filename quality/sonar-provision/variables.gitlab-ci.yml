@@ -1,0 +1,16 @@
+variables:
+  # ==== 项目预置 .sonar-project-provision（首次扫描前治理） ====
+  # [用户可配] 项目预置开关
+  QUALITY_SONAR_PROVISION_ENABLE: "true"
+  # [用户可配] 项目管理用镜像（含 curl + jq）
+  QUALITY_SONAR_PROVISION_IMAGE: "$CI_BASE_IMAGE"
+  # [用户可配] 管理员 token（需 admin 权限，通过 CI/CD Variables 注入 masked）
+  QUALITY_SONAR_ADMIN_TOKEN: ""
+  # [用户可配] 项目显示名（默认与 project key 一致）
+  QUALITY_SONAR_PROJECT_NAME: "$QUALITY_SONAR_PROJECT_KEY"
+  # [用户可配] 创建后主分支重命名目标（留空跳过）
+  QUALITY_SONAR_MAIN_BRANCH: "main"
+  # [用户可配] 绑定的质量阈名（留空跳过绑定）
+  QUALITY_SONAR_QUALITY_GATE: ""
+  # [用户可配] 绑定的质量规则集：格式 语言:规则集名，逗号分隔多组（如 go:Sonar way,js:Sonar way）；留空跳过
+  QUALITY_SONAR_QUALITY_PROFILES: ""

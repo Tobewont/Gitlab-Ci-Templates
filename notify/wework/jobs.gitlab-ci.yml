@@ -1,0 +1,14 @@
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/notify/variables.gitlab-ci.yml'
+  - local: '/notify/jobs.gitlab-ci.yml'
+  - local: '/notify/wework/variables.gitlab-ci.yml'
+
+# 企业微信自定义群机器人。地址 NOTIFY_WEWORK_WEBHOOK_URL，可选 NOTIFY_WEWORK_MENTIONED_MOBILES。
+.notify-wework:
+  extends: .notify-base
+  variables:
+    NOTIFY_CHANNEL: "wework"
+  script:
+    - !reference [.notify-send-channels, script]

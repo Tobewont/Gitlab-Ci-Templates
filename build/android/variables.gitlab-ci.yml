@@ -1,0 +1,15 @@
+variables:
+  # [用户可配] Android 分包执行镜像（Walle 镜像内含 java + walle jar）
+  BUILD_ANDROID_IMAGE: "registry.example.com/cicd/walle:1.1"
+  # [用户可配] 分包开关
+  BUILD_ANDROID_CHANNEL_ENABLE: "true"
+  # [用户可配] 待分包 APK 路径
+  BUILD_ANDROID_CHANNEL_APK: ""
+  # [用户可配] 输出目录（分包完成后的多渠道 APK 存放路径）
+  BUILD_ANDROID_CHANNEL_OUTPUT: "channel-apks"
+
+  # [用户可配] Walle（美团多渠道打包）
+  # 分包 jar 路径
+  BUILD_ANDROID_WALLE_JAR: "/usr/local/walle/subpackage.jar"
+  # Walle 渠道字符串（如 "appstore,appstore2,google_play"）
+  BUILD_ANDROID_WALLE_CHANNELS: ""

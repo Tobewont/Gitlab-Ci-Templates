@@ -1,0 +1,7 @@
+variables:
+  # [用户可配] Semgrep 代码模式扫描开关
+  SEC_SEMGREP_ENABLE: "true"
+  # [用户可配] Semgrep 执行镜像
+  SEC_SEMGREP_IMAGE: "registry.example.com/cicd/semgrep:latest"
+  SEC_SEMGREP_CONFIG: "auto"          # 规则集：auto / p/ci / 本地路径
+  SEC_SEMGREP_EXIT_CODE: "0"

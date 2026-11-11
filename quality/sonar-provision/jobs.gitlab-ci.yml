@@ -1,0 +1,73 @@
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/quality/sonar/variables.gitlab-ci.yml'
+  - local: '/quality/sonar-provision/variables.gitlab-ci.yml'
+
+stages:
+  - quality
+
+# 原子能力：SonarQube 项目预置（搜索/创建项目 + 改主分支 + 绑质量阈 + 绑规则集）
+# 用于首次扫描前的项目治理，一般放在 .sonar-scan 之前
+.sonar-project-provision:
+  extends: .base-job
+  image: $QUALITY_SONAR_PROVISION_IMAGE
+  stage: quality
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "SonarProjectProvision"
+    STEP_ENABLE: "$QUALITY_SONAR_PROVISION_ENABLE"
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（QUALITY_SONAR_PROVISION_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      # CI 配置保护拦截：guard 失败则跳过（needs 拦不住 when: always 的 job，按状态文件自行判定；文件不存在表示未接入 guard，正常执行）
+      if [ -f .ci-config-guard-result ] && [ "$(cat .ci-config-guard-result 2>/dev/null)" = "blocked" ]; then
+        echo "[skip] CI 配置保护检查未通过（ci-config-guard failed），跳过 $STEP_NAME"; exit 0
+      fi
+      if [ -z "$QUALITY_SONAR_HOST_URL" ] || [ -z "$QUALITY_SONAR_ADMIN_TOKEN" ]; then
+        echo "[skip] QUALITY_SONAR_HOST_URL / QUALITY_SONAR_ADMIN_TOKEN 未配置"; exit 0
+      fi
+      HOST="${QUALITY_SONAR_HOST_URL%/}"
+      KEY="$QUALITY_SONAR_PROJECT_KEY"
+      # 管理 API 用 admin token 作为 basic auth 用户名（Sonar 约定：token 作用户名、密码留空）
+      AUTH="-u ${QUALITY_SONAR_ADMIN_TOKEN}:"
+      echo "[provision] 检查项目是否存在: $KEY"
+      TOTAL=$(curl --fail --silent --show-error --connect-timeout 10 --max-time 30 $AUTH \
+        "$HOST/api/projects/search?projects=$KEY" | jq -er '.paging.total')
+      if [ "$TOTAL" = "0" ]; then
+        echo "[provision] 项目不存在，创建: $KEY"
+        curl --fail --silent --show-error --connect-timeout 10 --max-time 30 $AUTH -X POST "$HOST/api/projects/create" \
+          --data-urlencode "name=$QUALITY_SONAR_PROJECT_NAME" \
+          --data-urlencode "project=$KEY"
+        echo
+        if [ -n "$QUALITY_SONAR_MAIN_BRANCH" ]; then
+          echo "[provision] 重命名主分支为: $QUALITY_SONAR_MAIN_BRANCH"
+          curl --fail --silent --show-error --connect-timeout 10 --max-time 30 $AUTH -X POST "$HOST/api/project_branches/rename" \
+            --data-urlencode "project=$KEY" \
+            --data-urlencode "name=$QUALITY_SONAR_MAIN_BRANCH" || echo "[warn] 主分支重命名失败(可忽略)"
+        fi
+      else
+        echo "[provision] 项目已存在，跳过创建"
+      fi
+      if [ -n "$QUALITY_SONAR_QUALITY_GATE" ]; then
+        echo "[provision] 绑定质量阈: $QUALITY_SONAR_QUALITY_GATE"
+        curl --fail --silent --show-error --connect-timeout 10 --max-time 30 $AUTH -X POST "$HOST/api/qualitygates/select" \
+          --data-urlencode "gateName=$QUALITY_SONAR_QUALITY_GATE" \
+          --data-urlencode "projectKey=$KEY" || echo "[warn] 质量阈绑定失败"
+      fi
+      if [ -n "$QUALITY_SONAR_QUALITY_PROFILES" ]; then
+        echo "$QUALITY_SONAR_QUALITY_PROFILES" | tr ',' '\n' | while IFS=: read -r LANG QP; do
+          [ -z "$LANG" ] && continue
+          echo "[provision] 绑定质量规则集: lang=$LANG profile=$QP"
+          curl --fail --silent --show-error --connect-timeout 10 --max-time 30 $AUTH -X POST "$HOST/api/qualityprofiles/add_project" \
+            --data-urlencode "language=$LANG" \
+            --data-urlencode "qualityProfile=$QP" \
+            --data-urlencode "project=$KEY" || echo "[warn] 规则集绑定失败: $LANG"
+        done
+      fi
+      echo "[provision] 完成"

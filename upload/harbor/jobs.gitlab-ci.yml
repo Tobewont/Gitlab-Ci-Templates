@@ -1,0 +1,116 @@
+# 原子能力：推送 Docker 镜像到 Harbor
+# 前置：本地 docker daemon 已有目标镜像（由 build/docker/.docker-build 或业务侧其他方式构建）
+# 凭据: 与 build/docker 共用 HARBOR_USERNAME + HARBOR_PASSWORD
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/build/docker/variables.gitlab-ci.yml'
+  - local: '/upload/harbor/variables.gitlab-ci.yml'
+
+stages:
+  - upload
+
+.harbor-push:
+  extends: .base-job
+  image: $UPLOAD_HARBOR_IMAGE
+  stage: upload
+  variables:
+    STEP_NAME: "Harbor Push"
+    STEP_ENABLE: "$UPLOAD_HARBOR_ENABLE"
+  script:
+    - |
+      set -eu
+      : > "${CI_PROJECT_DIR:-.}/ci-notify-artifacts.tsv" || true
+      case "$STEP_ENABLE" in
+        false) echo "[skip] $STEP_NAME 未启用（UPLOAD_HARBOR_ENABLE=$STEP_ENABLE）"; exit 0 ;;
+        true)  ;;
+        *)     echo "[error] UPLOAD_HARBOR_ENABLE 必须为 true/false，当前值: $STEP_ENABLE"; exit 1 ;;
+      esac
+      case "$UPLOAD_HARBOR_PUSH_LATEST" in
+        true|false) ;;
+        *) echo "[error] UPLOAD_HARBOR_PUSH_LATEST 必须为 true/false，当前值: $UPLOAD_HARBOR_PUSH_LATEST"; exit 1 ;;
+      esac
+      if [ -z "$UPLOAD_HARBOR_IMAGE_NAME" ]; then
+        echo "[error] 已启用 Harbor Push，但 UPLOAD_HARBOR_IMAGE_NAME 未配置"; exit 1
+      fi
+      if [ ! -S /var/run/docker.sock ]; then
+        echo "错误：/var/run/docker.sock 不存在"; exit 1
+      fi
+
+      # ── 解析 registry ──
+      REGISTRY="${UPLOAD_HARBOR_REGISTRY:-${BUILD_DOCKER_REGISTRY:-registry.example.com}}"
+      REGISTRY="${REGISTRY#http://}"
+      REGISTRY="${REGISTRY#https://}"
+      REGISTRY="${REGISTRY%/}"
+      if [ -z "$REGISTRY" ]; then
+        echo "[fail] UPLOAD_HARBOR_REGISTRY / BUILD_DOCKER_REGISTRY 未配置"; exit 1
+      fi
+      echo "==> Registry: $REGISTRY"
+
+      # ── Tag 策略：业务显式 > CI_COMMIT_TAG > commit message vX.Y.Z > CI_COMMIT_SHORT_SHA ──
+      if [ -n "$UPLOAD_HARBOR_IMAGE_TAG" ]; then
+        TAG="$UPLOAD_HARBOR_IMAGE_TAG"
+      elif [ -n "$CI_COMMIT_TAG" ]; then
+        TAG="$CI_COMMIT_TAG"
+      else
+        TAG=""
+        if [ "$BUILD_DOCKER_PARSE_COMMIT_VERSION" = "true" ] && [ -n "$CI_COMMIT_MESSAGE" ]; then
+          V=$(printf '%s' "$CI_COMMIT_MESSAGE" | grep -oiE '\bbuild[[:space:]]+v?[0-9]+(\.[0-9]+)+\b' | head -1 | awk '{print $NF}' || true)
+          if [ -n "$V" ]; then
+            case "$V" in v*) TAG="$V" ;; *) TAG="v$V" ;; esac
+          fi
+        fi
+        [ -z "$TAG" ] && TAG="$CI_COMMIT_SHORT_SHA"
+      fi
+      DEST="${REGISTRY}/${UPLOAD_HARBOR_IMAGE_NAME}:${TAG}"
+      SRC="${UPLOAD_HARBOR_SOURCE_REF:-$DEST}"
+
+      if [ -z "$HARBOR_USERNAME" ]; then
+        echo "[fail] HARBOR_USERNAME 未配置（请在 GitLab CI/CD Variables 中注入）"; exit 1
+      fi
+      if [ -z "$HARBOR_PASSWORD" ]; then
+        echo "[fail] HARBOR_PASSWORD 未配置（请在 GitLab CI/CD Variables 中 masked 注入）"; exit 1
+      fi
+      echo "==> docker login $REGISTRY ($HARBOR_USERNAME)"
+      echo "$HARBOR_PASSWORD" | docker login "$REGISTRY" -u "$HARBOR_USERNAME" --password-stdin
+
+      if [ "$SRC" != "$DEST" ]; then
+        echo "==> docker tag $SRC $DEST"
+        docker tag "$SRC" "$DEST"
+      fi
+      echo "==> docker push $DEST"
+      docker push "$DEST"
+      if [ "$UPLOAD_HARBOR_PUSH_LATEST" = "true" ]; then
+        LATEST="${REGISTRY}/${UPLOAD_HARBOR_IMAGE_NAME}:latest"
+        echo "==> docker tag & push $LATEST"
+        docker tag "$DEST" "$LATEST"
+        docker push "$LATEST"
+      fi
+      echo "已推送镜像: $DEST"
+      _ci_notify_record_image() {
+        _ref="$1"
+        [ -n "$_ref" ] || return 0
+        _host="${_ref%%/*}"
+        _rest="${_ref#*/}"
+        _name="${_rest%:*}"
+        case "$_name" in
+          */*) _proj="${_name%%/*}"; _repo="${_name#*/}" ;;
+          *) _proj="library"; _repo="$_name" ;;
+        esac
+        _repo_enc=""
+        _left="$_repo"
+        while [ -n "$_left" ]; do
+          case "$_left" in
+            */*) _repo_enc="${_repo_enc}${_left%%/*}%2F"; _left="${_left#*/}" ;;
+            *) _repo_enc="${_repo_enc}${_left}"; _left="" ;;
+          esac
+        done
+        _url="https://${_host}/harbor/projects/${_proj}/repositories/${_repo_enc}/artifacts-tab"
+        printf 'image\t%s\t%s\n' "$_ref" "$_url" >> "${CI_PROJECT_DIR:-.}/ci-notify-artifacts.tsv" || true
+      }
+      _ci_notify_record_image "$DEST" || true
+  artifacts:
+    paths:
+      - ci-notify-artifacts.tsv
+    expire_in: 1 day
+    when: on_success

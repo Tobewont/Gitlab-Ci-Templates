@@ -1,0 +1,9 @@
+variables:
+  # [用户可配] 钉钉群机器人 Webhook URL（业务侧在自己仓库 CI/CD Variables masked 注入）
+  NOTIFY_DINGTALK_WEBHOOK_URL: ""
+  # [用户可配] 钉钉签名密钥（可选，走"加签"安全模式）
+  NOTIFY_DINGTALK_SIGN_SECRET: ""
+  # [用户可配] @人手机号（逗号分隔）
+  NOTIFY_DINGTALK_AT_MOBILES: ""
+  # [用户可配] 是否 @全体
+  NOTIFY_DINGTALK_AT_ALL: "false"

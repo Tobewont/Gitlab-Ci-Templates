@@ -1,0 +1,13 @@
+variables:
+  # [用户可配] Checkmarx CxSAST 扫描开关（在 CI_BASE_IMAGE 内执行，业务侧需预装 runCxConsole.sh）
+  SEC_CHECKMARX_ENABLE: "false"
+  SEC_CHECKMARX_IMAGE: "$CI_BASE_IMAGE"
+  SEC_CHECKMARX_SERVER_URL: ""        # Checkmarx 服务器地址
+  SEC_CHECKMARX_USERNAME: ""          # 通过 GitLab CI/CD Variables 注入
+  SEC_CHECKMARX_PASSWORD: ""          # 通过 GitLab CI/CD Variables 注入（masked）
+  SEC_CHECKMARX_PROJECT_NAME: "$CI_PROJECT_NAME"
+  SEC_CHECKMARX_TEAM_PATH: "/CxServer"
+  SEC_CHECKMARX_PRESET: "Checkmarx Default"
+  SEC_CHECKMARX_HIGH_THRESHOLD: ""    # 留空则不设阈值
+  SEC_CHECKMARX_MEDIUM_THRESHOLD: ""
+  SEC_CHECKMARX_LOW_THRESHOLD: ""

@@ -1,0 +1,21 @@
+variables:
+  # ── .get-mr-diff ────────────────────────────────────────────────
+  # [用户可配] GitLab API token。默认 GITLAB_TOKEN
+  GIT_MR_TOKEN: "$GITLAB_TOKEN"
+  # [用户可配] MR diff 输出文件路径
+  GIT_MR_DIFF_FILE: "mr_diff.txt"
+
+  # ── .close-mr ────────────────────────────────────────────────
+  # [用户可配] 关闭 MR 时附加的说明（写入 description）
+  GIT_MR_CLOSE_COMMENT: ""
+
+  # ── .merge-mr ────────────────────────────────────────────────
+  # [用户可配] 合并 MR 的行为开关（均默认 false / 空，即立即合并、不删源分支、不 squash、用默认 commit message）
+  # [用户可配] true 时改用 merge_when_pipeline_succeeds（配合 Pipelines must succeed，pipeline 成功后自动合并）
+  GIT_MR_MERGE_WHEN_PIPELINE_SUCCEEDS: "false"
+  # [用户可配] true 时合并后删除源分支
+  GIT_MR_MERGE_REMOVE_SOURCE_BRANCH: "false"
+  # [用户可配] true 时 squash 合并
+  GIT_MR_MERGE_SQUASH: "false"
+  # [用户可配] 自定义合并 commit message（留空用 GitLab 默认）
+  GIT_MR_MERGE_COMMIT_MESSAGE: ""

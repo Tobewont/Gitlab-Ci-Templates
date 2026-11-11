@@ -1,0 +1,53 @@
+variables:
+  # [用户可配] Go 编译执行镜像
+  BUILD_GO_IMAGE: "registry.example.com/library/golang:1.23"
+  # [用户可配] Go 构建开关
+  BUILD_GO_ENABLE: "true"
+  # [用户可配] GOPROXY / GOPRIVATE / GONOSUMDB
+  # [用户可配] GOPROXY 完整值
+  #   留空 + USE_CHINA_MIRROR=true → https://goproxy.cn,direct
+  #   留空 + USE_CHINA_MIRROR=false → https://proxy.golang.org,direct
+  BUILD_GO_PROXY: ""
+  BUILD_GO_PRIVATE: ""
+  BUILD_GO_NOSUMDB: ""
+  # [用户可配] 目标 GOOS / GOARCH（多个用逗号分隔，如 "linux/amd64,linux/arm64"）
+  BUILD_GO_PLATFORMS: "linux/amd64"
+  # [用户可配] CGO_ENABLED
+  BUILD_GO_CGO_ENABLED: "0"
+  # [用户可配] 构建主目录（含 go.mod / main.go）
+  BUILD_GO_SOURCE_DIR: "."
+  # [用户可配] 构建入口（相对 SOURCE_DIR，留空则默认 ./）
+  BUILD_GO_MAIN: "."
+  # [用户可配] 二进制输出目录（相对仓库根）
+  BUILD_GO_OUTPUT_DIR: "dist"
+  # [用户可配] 输出文件名前缀（留空则用 $CI_PROJECT_NAME）
+  BUILD_GO_OUTPUT_PREFIX: ""
+  # [用户可配] 输出文件名的平台后缀：
+  #   platform（默认）→ <PREFIX>-<GOOS>-<GOARCH>，多平台并存不覆盖
+  #   none            → <PREFIX>，仅单平台可用（多平台会相互覆盖并报错）
+  #   windows 目标自动追加 .exe，与本项无关
+  BUILD_GO_OUTPUT_SUFFIX: "platform"
+  # [用户可配] 是否自动注入版本类 -X 符号到 -ldflags
+  #   开启后按下列 *_SYMBOL 变量注入：版本 / 编译时间 / commit / 分支
+  #   某个 *_SYMBOL 置空则跳过该项注入（业务侧按自己的 main 变量名裁剪）
+  BUILD_GO_INJECT_VERSION: "true"
+  # [用户可配] 版本变量的 Go 符号路径（业务侧若不用 main.VERSION 可覆盖）
+  BUILD_GO_VERSION_SYMBOL: "main.VERSION"
+  BUILD_GO_BUILDTIME_SYMBOL: "main.BUILDTIME"
+  # [用户可配] commit / 分支 的 Go 符号路径（默认注入，置空则跳过）
+  #   值分别取 $CI_COMMIT_SHORT_SHA 与 $CI_COMMIT_REF_NAME
+  BUILD_GO_COMMIT_SYMBOL: "main.COMMIT"
+  BUILD_GO_BRANCH_SYMBOL: "main.BRANCH"
+  # [用户可配] 版本字符串来源（留空则用 .git-describe 生成 CI_APP_VERSION；若 CI_APP_VERSION 已由前置 job 导出，则直接使用）
+  BUILD_GO_VERSION: ""
+  # [用户可配] 编译时间格式（date 的 + 格式串，不含前导 +）
+  #   可含空格，如 "%Y-%m-%d %H:%M:%S %z"（能力对 -X 值加单引号，不会被 linker 截断）
+  BUILD_GO_BUILDTIME_FORMAT: "%Y-%m-%d_%H:%M:%S"
+  # [用户可配] 附加 -ldflags 内容（追加到自动注入之后）
+  #   默认 "-w -s" 会剥离调试信息与符号表以减小体积；
+  #   需要 dlv 调试或保留符号表时置空
+  BUILD_GO_EXTRA_LDFLAGS: "-w -s"
+  # [用户可配] 附加 go build 参数（如 -tags=timetzdata）
+  #   注意：能力内部交叉编译循环使用 IFS=,，含空格的多 token 参数请写成
+  #   -tags=a,b 这类单 token 形式
+  BUILD_GO_EXTRA_ARGS: ""

@@ -1,0 +1,20 @@
+variables:
+  # [用户可配] 制品推送开关
+  UPLOAD_GITLAB_ENABLE: "true"
+  # [用户可配] 执行镜像（需含 git）
+  UPLOAD_GITLAB_IMAGE: "$CI_BASE_IMAGE"
+  # [用户可配] 制品仓 Git URL（不含凭据，如 https://git.example.com/group/repo.git）
+  UPLOAD_GITLAB_REPO_URL: ""
+  # [用户可配] 目标分支（留空则跟随源分支 CI_COMMIT_REF_NAME）
+  UPLOAD_GITLAB_BRANCH: ""
+  # [用户可配] 待推送的本地路径（文件或目录，逗号分隔）
+  UPLOAD_GITLAB_LOCAL_PATHS: ""
+  # [用户可配] 目标仓内的子目录（留空推到仓库根；禁止 . / .. 路径段）
+  UPLOAD_GITLAB_TARGET_DIR: ""
+  # [用户可配] 提交 Git 凭据（通过 GitLab CI/CD Variables masked 注入）
+  # 用户名默认取全局 GITLAB_USERNAME（base 层，默认 oauth2）；需单独指定时在此覆盖
+  UPLOAD_GITLAB_USERNAME: "$GITLAB_USERNAME"
+  UPLOAD_GITLAB_TOKEN: ""
+  # [用户可配] Git 提交作者/邮箱
+  UPLOAD_GITLAB_AUTHOR_NAME: "ci"
+  UPLOAD_GITLAB_AUTHOR_EMAIL: "ci@example.com"

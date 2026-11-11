@@ -1,0 +1,51 @@
+.workflow-rules:
+  rules:
+    # MR 事件
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: always
+    # Tag 事件
+    - if: '$CI_COMMIT_TAG != null'
+      when: always
+    # 默认分支 push:
+    #   若 CI_REQUIRE_BUILD_KEYWORD=true, commit message 必须含 build/smoke/release 任一关键字
+    #   业务侧可通过覆盖 .build-filter 支持自定义关键字
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_REQUIRE_BUILD_KEYWORD == "true" && $CI_COMMIT_MESSAGE !~ /\b(build|smoke|release)\b/i'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: always
+    - when: always
+
+.base-job:
+  image: $CI_BASE_IMAGE
+  # 默认不允许被新 pipeline 打断：多人合并到同一分支时，GitLab 仅按目标分支分组取消，
+  # 无法区分来源分支，开启会误取消他人 pipeline。故默认 false，不主动取消任何 pipeline。
+  interruptible: false
+  before_script:
+    - export LC_ALL="$CI_LOCALE"
+    - export LANG="$CI_LOCALE"
+
+# 信息展示型模板（非功能能力）：在 pipeline 起始打印构建环境信息，便于诊断/日志追溯。
+# 仅输出环境变量，无副作用；业务侧可 extends 用作首个信息展示 job，或忽略不用。
+.base-prepare:
+  extends: .base-job
+  script:
+    - |
+      echo "准备构建环境..."
+      echo "项目: $CI_PROJECT_NAME"
+      echo "分支: $CI_COMMIT_REF_NAME"
+      echo "Commit: $CI_COMMIT_SHORT_SHA"
+      echo "提交信息: $CI_COMMIT_MESSAGE"
+      echo "Pipeline Source: $CI_PIPELINE_SOURCE"
+
+# 流水线 job 列表获取（脚本片段，hidden job + !reference 复用）
+# 定义 shell 函数 _pipeline_jobs_fetch：拉取当前 pipeline 全部 job 的 JSON 数组写入 JOBS_JSON，
+#   请求失败时 JOBS_JSON 为空数组 []；同名 job 重试产生多条记录，归并口径由消费方自行决定。
+# 依赖：第一个参数为 API token，省略时用 GITLAB_TOKEN；curl；CI_API_V4_URL / CI_PROJECT_ID / CI_PIPELINE_ID 为 CI 预定义变量。
+# 用法：先 !reference [.pipeline-jobs-fetch, script] 完成定义，再调用 _pipeline_jobs_fetch [token]。
+.pipeline-jobs-fetch:
+  script:
+    - |
+      _pipeline_jobs_fetch() {
+        _tok="${1:-$GITLAB_TOKEN}"
+        JOBS_JSON=$(curl -sS --max-time 30 -H "PRIVATE-TOKEN: $_tok" "$CI_API_V4_URL/projects/$CI_PROJECT_ID/pipelines/$CI_PIPELINE_ID/jobs?per_page=100" 2>/dev/null || echo "[]")
+      }

@@ -1,0 +1,89 @@
+workflow:
+  # CI 配置防合并覆盖前提：MR 事件必须产生 MR 流水线（guard 仅存在于 MR 流水线）；
+  #   分支有打开 MR 时去重分支流水线（保护卡在 MR 流水线，绕过分支流水线也无法合入）
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+# 合规完整链路：Gitleaks / 文档检测 / 敏感词 / 正则规则 / LLM 规则 / Sonar / Checkmarx → 报告 → 通知
+include:
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'security/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'checks/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'compliance/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'quality/sonar/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'notify/jobs.gitlab-ci.yml'
+
+stages:
+  - security
+  - checks
+  - compliance
+  - quality
+  - notify
+
+variables:
+  # ── 安全扫描变量
+  SEC_GITLEAKS_ENABLE: "true"
+  SEC_CHECKMARX_ENABLE: "true"
+
+  # ── 内容检查变量
+  CHECKS_DOC_DETECT_ENABLE: "true"
+  CHECKS_SENSITIVE_WORD_ENABLE: "true"
+
+  # ── 合规检测变量
+  COMPLIANCE_ENABLE_REGEX: "true"
+  COMPLIANCE_ENABLE_LLM: "true"
+
+my-gitleaks:
+  extends: .gitleaks
+
+my-checkmarx:
+  extends: .checkmarx
+
+my-doc-detect:
+  extends: .doc-detect
+
+my-sensitive-word:
+  extends: .sensitive-word-check
+
+# 以下三个 compliance 能力需在 COMPLIANCE_SCRIPT_DIR 下提供检测脚本
+# （check_regex.sh / check_llm.sh / post_report.sh），脚本缺失时自动跳过。
+my-regex-check:
+  extends: .regex-check
+
+my-llm-check:
+  extends: .llm-check
+
+my-sonar:
+  extends: .sonar-scan
+
+my-compliance-report:
+  extends: .compliance-report
+  needs:
+    - my-regex-check
+    - my-llm-check
+
+my-notify:
+  extends: .notify
+  needs:
+    - job: my-compliance-report
+      optional: true
+    - job: my-sonar
+      optional: true
+
+# CI 配置防合并覆盖：MR 源分支改动 .gitlab-ci.yml 则 guard 失败、卡死合并（.pre 阶段，先于所有 job；guard 失败则后续 job 全部不启动）
+#   默认启用（CHECKS_CI_CONFIG_GUARD_ENABLE: "true"）；显式设为 "false" 则 guard job 不创建、不作其它 job 前提（needs optional 自动豁免，零等待）
+#   guard 仅在 MR 流水线存在（模板 rules 限定），故上方 workflow rules 必须放行 merge_request_event
+ci-config-guard:
+  extends: .ci-config-guard

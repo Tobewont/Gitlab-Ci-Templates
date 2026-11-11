@@ -1,0 +1,66 @@
+# 原子能力：Java Maven 构建
+# 镜像基于 eclipse-temurin JDK（不含 mvn），首次执行时通过 apk 安装 maven；
+# 若业务侧使用内置 mvn 的镜像，可覆盖 BUILD_JAVA_IMAGE。
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/build/java/variables.gitlab-ci.yml'
+
+stages:
+  - build
+
+.maven-build:
+  extends: .base-job
+  image: $BUILD_JAVA_IMAGE
+  stage: build
+  variables:
+    STEP_NAME: "Maven Build"
+    STEP_ENABLE: "$BUILD_JAVA_MAVEN_ENABLE"
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（BUILD_JAVA_MAVEN_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      # 若镜像未内置 mvn，就近装一个
+      if ! command -v mvn >/dev/null 2>&1; then
+        if command -v apk >/dev/null 2>&1; then
+          sed -i "s#dl-cdn.alpinelinux.org#${PKG_ALPINE_MIRROR:-mirrors.aliyun.com}#g" /etc/apk/repositories 2>/dev/null || true
+          apk add --no-cache maven >/dev/null 2>&1
+        elif command -v apt-get >/dev/null 2>&1; then
+          if [ "${USE_CHINA_MIRROR:-true}" = "true" ] && [ -f /etc/apt/sources.list ]; then
+            M="${PKG_APT_MIRROR:-mirrors.aliyun.com}"
+            sed -i "s|deb.debian.org|$M|g; s|security.debian.org|$M|g; s|archive.ubuntu.com|$M|g; s|security.ubuntu.com|$M|g" /etc/apt/sources.list 2>/dev/null || true
+          fi
+          apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq maven >/dev/null 2>&1
+        fi
+      fi
+      SETTINGS_ARG=""
+      if [ -n "$BUILD_JAVA_MAVEN_SETTINGS" ] && [ -f "$BUILD_JAVA_MAVEN_SETTINGS" ]; then
+        SETTINGS_ARG="-s $BUILD_JAVA_MAVEN_SETTINGS"
+      elif [ -n "$MAVEN_MIRROR_URL" ]; then
+        # 业务未提供 settings 时，用国内 mirror 生成一份（默认阿里云公共仓库，加速依赖下载）
+        mkdir -p "$HOME/.m2"
+        cat > "$HOME/.m2/ci-settings.xml" <<EOF
+      <settings>
+        <mirrors>
+          <mirror>
+            <id>${MAVEN_MIRROR_ID:-aliyun-public}</id>
+            <mirrorOf>${MAVEN_MIRROR_OF:-*}</mirrorOf>
+            <url>$MAVEN_MIRROR_URL</url>
+          </mirror>
+        </mirrors>
+      </settings>
+      EOF
+        SETTINGS_ARG="-s $HOME/.m2/ci-settings.xml"
+      fi
+      mvn $SETTINGS_ARG $BUILD_JAVA_MAVEN_GOALS $BUILD_JAVA_MAVEN_EXTRA_ARGS
+  artifacts:
+    when: always
+    paths:
+      - $BUILD_JAVA_ARTIFACT_PATH
+    expire_in: "7 days"
+  cache:
+    key: "$CI_PROJECT_ID-maven"
+    paths:
+      - .m2/repository

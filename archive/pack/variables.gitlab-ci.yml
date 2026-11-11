@@ -1,0 +1,37 @@
+variables:
+  # 执行镜像（ci-base 内置 tar/gzip/zip/unzip/xz/zstd）
+  ARCHIVE_PACK_IMAGE: "$CI_BASE_IMAGE"
+  ARCHIVE_PACK_ENABLE: "true"
+
+  # 归档格式：tar.gz / tgz / tar.bz2 / tbz2 / tar.xz / txz / tar.zst / tar / zip / gzip
+  #   gzip 为单文件逐个压缩（产出 <文件>.gz），其余为多文件归档
+  ARCHIVE_PACK_FORMAT: "tar.gz"
+
+  # 待归档的文件 / 目录，空格分隔，相对 $CI_PROJECT_DIR；路径不得含空格
+  ARCHIVE_PACK_PATHS: ""
+
+  # 输出路径。留空则为 $ARCHIVE_PACK_OUTPUT_DIR/<项目名>-<版本>.<格式>
+  ARCHIVE_PACK_OUTPUT: ""
+  ARCHIVE_PACK_OUTPUT_DIR: "dist"
+  # 默认命名中的版本片段。留空取 CI_APP_VERSION，再回退 CI_COMMIT_SHORT_SHA
+  ARCHIVE_PACK_VERSION: ""
+
+  # 归档内顶层目录名。留空则按原路径结构存放
+  ARCHIVE_PACK_BASE_DIR: ""
+  # 剥离源路径前 N 层（仅 BASE_DIR 为空且 PATHS 为单一路径时生效）
+  ARCHIVE_PACK_STRIP: "0"
+
+  # 排除模式，空格分隔的 glob（如 "*.log .git"）
+  ARCHIVE_PACK_EXCLUDE: ""
+  # 压缩级别 1-9。留空用各工具默认
+  ARCHIVE_PACK_LEVEL: ""
+  # 输出已存在时覆盖
+  ARCHIVE_PACK_OVERWRITE: "true"
+
+  # 生成 <输出>.sha256
+  ARCHIVE_PACK_CHECKSUM: "true"
+  # 落 artifacts 的路径。ARCHIVE_PACK_OUTPUT 指向 OUTPUT_DIR 之外时需同步改此项
+  ARCHIVE_PACK_ARTIFACT_PATH: "$ARCHIVE_PACK_OUTPUT_DIR/"
+  # dotenv 输出：CI_ARCHIVE_PATH / CI_ARCHIVE_NAME / CI_ARCHIVE_SIZE / CI_ARCHIVE_SHA256
+  #   gzip 格式仅输出 CI_ARCHIVE_PATH（全部 .gz 路径）；CHECKSUM=false 时不输出 SHA256
+  ARCHIVE_PACK_DOTENV_FILE: "archive.env"

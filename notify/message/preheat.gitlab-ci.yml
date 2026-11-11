@@ -1,0 +1,48 @@
+# 场景文案：预告通知（.notify-preheat / .notify-restart-notice）
+#   与状态类通知（pipeline/build/deploy/...）隔离：不查 job / pipeline 状态。
+#   .notify-msg-preheat 产出标题、正文，以及渠道发送用的 JSON。
+.notify-msg-preheat:
+  script:
+    - |
+      # ── 文案：优先 NOTIFY_PREHEAT_TEXT；为空按「服务重启」场景组装 ──
+      PREHEAT_SERVICE=${NOTIFY_RESTART_SERVICE:-}
+      [ -n "$PREHEAT_SERVICE" ] || PREHEAT_SERVICE=${CI_PROJECT_NAME:-}
+      # 服务组取 NOTIFY_PREHEAT_SVRGROUP；未配置则文案不含服务组
+      PREHEAT_SVRGROUP=${NOTIFY_PREHEAT_SVRGROUP:-}
+      NOTIFY_PREHEAT_MSG=$NOTIFY_PREHEAT_TEXT
+      if [ -z "$NOTIFY_PREHEAT_MSG" ]; then
+        case "$NOTIFY_RESTART_LEAD_MINUTES" in
+          ''|*[!0-9]*|0) echo "[error] NOTIFY_RESTART_LEAD_MINUTES 必须是正整数: $NOTIFY_RESTART_LEAD_MINUTES"; exit 1 ;;
+        esac
+        # 版本优先级：NOTIFY_RESTART_VERSION > 源码宏
+        PREHEAT_VERSION=${NOTIFY_RESTART_VERSION:-}
+        if [ -z "$PREHEAT_VERSION" ] && [ -n "$NOTIFY_PREHEAT_MACRO_FILE" ] && [ -n "$NOTIFY_PREHEAT_MACRO_VERSION" ]; then
+          if [ -f "$NOTIFY_PREHEAT_MACRO_FILE" ]; then
+            PREHEAT_VERSION=$(grep "^#define[[:space:]]\+${NOTIFY_PREHEAT_MACRO_VERSION}[[:space:]]" "$NOTIFY_PREHEAT_MACRO_FILE" 2>/dev/null | head -1 | cut -d'"' -f2 || true)
+            [ -n "$PREHEAT_VERSION" ] && echo "[preheat] 版本取自源码宏 ${NOTIFY_PREHEAT_MACRO_FILE}:${NOTIFY_PREHEAT_MACRO_VERSION} = $PREHEAT_VERSION"
+          else
+            echo "[preheat] 源码宏文件不存在，跳过版本解析: $NOTIFY_PREHEAT_MACRO_FILE"
+          fi
+        fi
+        VERSION_PART=""
+        [ -n "$PREHEAT_VERSION" ] && VERSION_PART="（版本 $PREHEAT_VERSION）"
+        SVRGROUP_PART=""
+        [ -n "$PREHEAT_SVRGROUP" ] && SVRGROUP_PART="（服务组 $PREHEAT_SVRGROUP）"
+        NOTIFY_PREHEAT_MSG="【重启预告】${NOTIFY_PREHEAT_ENV_TEXT}的 ${PREHEAT_SERVICE} 服务${VERSION_PART}${SVRGROUP_PART}将在 ${NOTIFY_RESTART_LEAD_MINUTES} 分钟后重启，请注意检查。"
+      fi
+      if [ -n "$NOTIFY_PREHEAT_EXTRA_TEXT" ]; then
+        NOTIFY_PREHEAT_MSG=$(printf '%s\n%s' "$NOTIFY_PREHEAT_MSG" "$NOTIFY_PREHEAT_EXTRA_TEXT")
+      fi
+      NOTIFY_PREHEAT_TITLE_TEXT=$NOTIFY_PREHEAT_TITLE
+      [ -n "$NOTIFY_PREHEAT_TITLE_TEXT" ] || NOTIFY_PREHEAT_TITLE_TEXT="$PREHEAT_SERVICE 重启预告"
+      echo "==== 预告消息 (service=$PREHEAT_SERVICE svrgroup=${PREHEAT_SVRGROUP:--}) ===="
+      printf '%s\n' "$NOTIFY_PREHEAT_MSG"
+      echo "=========================================="
+
+      _json_escape() { python3 -c "import sys, json; print(json.dumps(sys.stdin.buffer.read().decode('utf-8')))"; }
+      P_TITLE_JSON=$(printf '%s' "$NOTIFY_PREHEAT_TITLE_TEXT" | _json_escape)
+      P_MSG_JSON=$(printf '%s' "$NOTIFY_PREHEAT_MSG" | _json_escape)
+      P_COMBO=$(printf '%s\n\n%s' "$NOTIFY_PREHEAT_TITLE_TEXT" "$NOTIFY_PREHEAT_MSG")
+      P_COMBO_JSON=$(printf '%s' "$P_COMBO" | _json_escape)
+      export NOTIFY_PREHEAT_MSG NOTIFY_PREHEAT_TITLE_TEXT PREHEAT_SERVICE PREHEAT_SVRGROUP
+      export P_TITLE_JSON P_MSG_JSON P_COMBO_JSON

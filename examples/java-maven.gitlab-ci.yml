@@ -1,0 +1,82 @@
+workflow:
+  # CI 配置防合并覆盖前提：MR 事件必须产生 MR 流水线（guard 仅存在于 MR 流水线）；
+  #   分支有打开 MR 时去重分支流水线（保护卡在 MR 流水线，绕过分支流水线也无法合入）
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+# Java Maven 服务端流水线：Maven 构建 → 静态扫描 → AI 评审 → Docker 构建 → 推送 harbor → 通知
+include:
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'build/java/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'quality/sonar/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'review/ai/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'build/docker/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'upload/harbor/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'notify/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'checks/jobs.gitlab-ci.yml'
+
+stages:
+  - build
+  - quality
+  - review
+  - upload
+  - notify
+
+variables:
+  # ── 统一业务变量（只改此区）
+  APP_IMAGE_NAME: "myapp/java-service"
+
+  # ── Maven 能力变量
+  BUILD_JAVA_MAVEN_GOALS: "clean package -DskipTests"
+  BUILD_JAVA_ARTIFACT_PATH: "target/*.jar"
+
+  # ── Docker / Harbor 能力变量
+  BUILD_DOCKER_IMAGE_NAME: "$APP_IMAGE_NAME"
+  UPLOAD_HARBOR_IMAGE_NAME: "$APP_IMAGE_NAME"
+
+my-maven-build:
+  extends: .maven-build
+
+my-sonar:
+  extends: .sonar-scan
+
+my-ai-review:
+  extends: .ai-review
+
+my-docker-build:
+  extends: .docker-build
+  needs:
+    - my-maven-build
+
+my-harbor-push:
+  extends: .harbor-push
+  needs:
+    - my-docker-build
+
+my-notify:
+  extends: .notify
+  needs:
+    - job: my-harbor-push
+      optional: true
+
+# CI 配置防合并覆盖：MR 源分支改动 .gitlab-ci.yml 则 guard 失败、卡死合并（.pre 阶段，先于所有 job；guard 失败则后续 job 全部不启动）
+#   默认启用（CHECKS_CI_CONFIG_GUARD_ENABLE: "true"）；显式设为 "false" 则 guard job 不创建、不作其它 job 前提（needs optional 自动豁免，零等待）
+#   guard 仅在 MR 流水线存在（模板 rules 限定），故上方 workflow rules 必须放行 merge_request_event
+ci-config-guard:
+  extends: .ci-config-guard

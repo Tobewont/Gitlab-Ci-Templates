@@ -1,0 +1,70 @@
+# 原子能力：FTP / FTPS 上传（drone-ftps 镜像内置 lftp）
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/upload/ftp/variables.gitlab-ci.yml'
+
+stages:
+  - upload
+
+.ftp-upload:
+  image: $UPLOAD_FTP_IMAGE
+  stage: upload
+  variables:
+    STEP_NAME: "FTP Upload"
+    STEP_ENABLE: "$UPLOAD_FTP_ENABLE"
+    # drone-ftps 通过 PLUGIN_* 环境变量驱动
+    PLUGIN_HOSTNAME: "$UPLOAD_FTP_HOSTNAME"
+    PLUGIN_USERNAME: "$UPLOAD_FTP_USERNAME"
+    PLUGIN_PASSWORD: "$UPLOAD_FTP_PASSWORD"
+    PLUGIN_SECURE: "$UPLOAD_FTP_SECURE"
+    PLUGIN_VERIFY: "$UPLOAD_FTP_VERIFY"
+    PLUGIN_CLEAN_DIR: "$UPLOAD_FTP_CLEAN_DIR"
+    PLUGIN_DEST_DIR: "$UPLOAD_FTP_DEST_DIR"
+    FTP_USERNAME: "$UPLOAD_FTP_USERNAME"
+    FTP_PASSWORD: "$UPLOAD_FTP_PASSWORD"
+  script:
+    - |
+      set -eu
+      : > "${CI_PROJECT_DIR:-.}/ci-notify-artifacts.tsv" || true
+      case "$STEP_ENABLE" in
+        false) echo "[skip] $STEP_NAME 未启用（UPLOAD_FTP_ENABLE=$STEP_ENABLE）"; exit 0 ;;
+        true)  ;;
+        *)     echo "[error] UPLOAD_FTP_ENABLE 必须为 true/false，当前值: $STEP_ENABLE"; exit 1 ;;
+      esac
+      case "$UPLOAD_FTP_SECURE:$UPLOAD_FTP_VERIFY:$UPLOAD_FTP_CLEAN_DIR" in
+        true:true:true|true:true:false|true:false:true|true:false:false|false:true:true|false:true:false|false:false:true|false:false:false) ;;
+        *) echo "[error] UPLOAD_FTP_SECURE / VERIFY / CLEAN_DIR 必须为 true/false"; exit 1 ;;
+      esac
+      if [ -z "$UPLOAD_FTP_HOSTNAME" ] || [ -z "$UPLOAD_FTP_USERNAME" ] || [ -z "$UPLOAD_FTP_PASSWORD" ]; then
+        echo "[error] 已启用 FTP Upload，但 UPLOAD_FTP_HOSTNAME / USERNAME / PASSWORD 未配置"; exit 1
+      fi
+      if [ -z "$UPLOAD_FTP_SRC_DIR" ]; then
+        echo "[error] 已启用 FTP Upload，但 UPLOAD_FTP_SRC_DIR 未配置"; exit 1
+      fi
+      case "/$UPLOAD_FTP_SRC_DIR/" in
+        */../*|*/./*) echo "[error] UPLOAD_FTP_SRC_DIR 禁止包含 . 或 .. 路径段: $UPLOAD_FTP_SRC_DIR"; exit 1 ;;
+      esac
+      # drone-ftps 需要 PLUGIN_SRC_DIR 是绝对路径
+      export PLUGIN_SRC_DIR="${CI_PROJECT_DIR}/${UPLOAD_FTP_SRC_DIR}"
+      if [ ! -e "$PLUGIN_SRC_DIR" ]; then
+        echo "[error] FTP 待上传路径不存在: $PLUGIN_SRC_DIR"; exit 1
+      fi
+      echo "==> FTP 上传 $PLUGIN_SRC_DIR → $UPLOAD_FTP_HOSTNAME:$UPLOAD_FTP_DEST_DIR"
+      /bin/upload.sh
+      _scheme="ftp"
+      [ "$UPLOAD_FTP_SECURE" = "true" ] && _scheme="ftps"
+      _dest="${UPLOAD_FTP_DEST_DIR#/}"
+      _dest="${_dest%/}"
+      if [ -n "$_dest" ]; then
+        _disp="${_scheme}://${UPLOAD_FTP_HOSTNAME}/${_dest}"
+      else
+        _disp="${_scheme}://${UPLOAD_FTP_HOSTNAME}/"
+      fi
+      printf 'ftp\t%s\t\n' "$_disp" >> "${CI_PROJECT_DIR:-.}/ci-notify-artifacts.tsv" || true
+      echo "FTP 上传完成"
+  artifacts:
+    paths:
+      - ci-notify-artifacts.tsv
+    expire_in: 1 day
+    when: on_success

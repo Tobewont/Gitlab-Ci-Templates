@@ -1,0 +1,42 @@
+# 原子能力：Lua 静态检查（luacheck）
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/git/variables.gitlab-ci.yml'
+  - local: '/git/jobs.gitlab-ci.yml'
+  - local: '/lint/lua/variables.gitlab-ci.yml'
+
+stages:
+  - lint
+
+.lua-lint:
+  extends: .base-job
+  image: $LINT_LUA_IMAGE
+  stage: lint
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "luacheck"
+    STEP_ENABLE: "$LINT_LUA_LUACHECK_ENABLE"
+    STEP_FILE_GLOB: "\\.lua$"
+  before_script:
+    - export LC_ALL="$CI_LOCALE"; export LANG="$CI_LOCALE"
+    - !reference [.get-changed-files, before_script]
+  script:
+    - !reference [.skip-if-disabled, script]
+    - !reference [.filter-changed-files, script]
+    - |
+      CFG_ARG=""
+      [ -n "$LINT_LUA_LUACHECK_CONFIG" ] && [ -f "$LINT_LUA_LUACHECK_CONFIG" ] && CFG_ARG="--config $LINT_LUA_LUACHECK_CONFIG"
+      echo "待扫描文件：" && echo "$STEP_MATCHED_FILES"
+      luacheck $CFG_ARG --quiet --formatter sonar "$LINT_LUA_LUACHECK_PATH" > luacheck-report.json || true
+      luacheck $CFG_ARG "$LINT_LUA_LUACHECK_PATH" || true
+  artifacts:
+    when: always
+    paths:
+      - luacheck-report.json
+    expire_in: "7 days"

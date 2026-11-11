@@ -1,0 +1,112 @@
+# 原子能力：把构建制品推送到另一个 Git 制品仓
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/upload/gitlab/variables.gitlab-ci.yml'
+
+stages:
+  - upload
+
+.gitlab-upload:
+  extends: .base-job
+  image: $UPLOAD_GITLAB_IMAGE
+  stage: upload
+  variables:
+    STEP_NAME: "Push Artifact to Git"
+    STEP_ENABLE: "$UPLOAD_GITLAB_ENABLE"
+  script:
+    - |
+      set -eu
+      : > "${CI_PROJECT_DIR:-.}/ci-notify-artifacts.tsv" || true
+      case "$STEP_ENABLE" in
+        false) echo "[skip] $STEP_NAME 未启用（UPLOAD_GITLAB_ENABLE=$STEP_ENABLE）"; exit 0 ;;
+        true)  ;;
+        *)     echo "[error] UPLOAD_GITLAB_ENABLE 必须为 true/false，当前值: $STEP_ENABLE"; exit 1 ;;
+      esac
+      if [ -z "$UPLOAD_GITLAB_REPO_URL" ] || [ -z "$UPLOAD_GITLAB_USERNAME" ] || [ -z "$UPLOAD_GITLAB_TOKEN" ] || [ -z "$UPLOAD_GITLAB_LOCAL_PATHS" ]; then
+        echo "[error] 已启用 Push Artifact to Git，但 REPO_URL / USERNAME / TOKEN / LOCAL_PATHS 未配置"; exit 1
+      fi
+      case "$UPLOAD_GITLAB_REPO_URL" in
+        http://*@*|https://*@*)
+          echo "[error] REPO_URL 禁止内嵌 userinfo/凭据，请使用 USERNAME/TOKEN 变量"; exit 1 ;;
+        http://*|https://*) ;;
+        *) echo "[error] REPO_URL 必须是 http(s) URL: $UPLOAD_GITLAB_REPO_URL"; exit 1 ;;
+      esac
+      VALID_PATHS=$(printf '%s' "$UPLOAD_GITLAB_LOCAL_PATHS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d')
+      if [ -z "$VALID_PATHS" ]; then
+        echo "[error] LOCAL_PATHS 未包含有效路径"; exit 1
+      fi
+      command -v git >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache git >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq git >/dev/null 2>&1)
+      if [ -n "${CI_COMMIT_TAG:-}" ] && [ -z "$UPLOAD_GITLAB_BRANCH" ]; then
+        echo "[error] Tag pipeline 必须显式配置 UPLOAD_GITLAB_BRANCH，避免 tag/branch 同名歧义"; exit 1
+      fi
+      BRANCH="${UPLOAD_GITLAB_BRANCH:-$CI_COMMIT_REF_NAME}"
+      GIT_HOST=$(printf '%s' "$UPLOAD_GITLAB_REPO_URL" | sed -E 's#^[a-zA-Z]+://([^/@]+@)?([^/:]+).*#\2#')
+      if [ -z "$GIT_HOST" ] || [ "$GIT_HOST" = "$UPLOAD_GITLAB_REPO_URL" ]; then
+        echo "[error] UPLOAD_GITLAB_REPO_URL 必须是 http(s) URL: $UPLOAD_GITLAB_REPO_URL"; exit 1
+      fi
+      {
+        echo "machine $GIT_HOST"
+        echo "login $UPLOAD_GITLAB_USERNAME"
+        echo "password $UPLOAD_GITLAB_TOKEN"
+      } > "$HOME/.netrc"
+      chmod 600 "$HOME/.netrc"
+      WORK=$(mktemp -d)
+      printf '%s\n' "$VALID_PATHS" > "$WORK/artifact-paths.txt"
+      git clone "$UPLOAD_GITLAB_REPO_URL" "$WORK/repo"
+      cd "$WORK/repo"
+      git config user.name  "$UPLOAD_GITLAB_AUTHOR_NAME"
+      git config user.email "$UPLOAD_GITLAB_AUTHOR_EMAIL"
+      if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+        git fetch origin "$BRANCH"
+        git checkout -B "$BRANCH" "origin/$BRANCH"
+      else
+        git checkout -B "$BRANCH"
+      fi
+
+      TARGET_DIR="${UPLOAD_GITLAB_TARGET_DIR#/}"
+      TARGET_DIR="${TARGET_DIR%/}"
+      if [ -n "$TARGET_DIR" ]; then
+        case "/$TARGET_DIR/" in
+          */../*|*/./*) echo "[error] TARGET_DIR 禁止包含 . 或 .. 路径段: $TARGET_DIR"; exit 1 ;;
+        esac
+        mkdir -p "$TARGET_DIR"
+      fi
+      while IFS= read -r p; do
+        case "/$p/" in
+          */../*|*/./*) echo "[error] 制品路径禁止包含 . 或 .. 路径段: $p"; exit 1 ;;
+        esac
+        SRC="$CI_PROJECT_DIR/$p"
+        [ ! -e "$SRC" ] && { echo "[error] 待上传制品不存在: $SRC"; exit 1; }
+        cp -rf "$SRC" "./$TARGET_DIR"
+      done < "$WORK/artifact-paths.txt"
+
+      git add --all
+      if git diff --cached --quiet; then
+        echo "制品与目标仓一致，无需新 commit/push"; exit 0
+      fi
+      git commit -m "ci: [$CI_PROJECT_NAME] commit=$CI_COMMIT_SHORT_SHA branch=$CI_COMMIT_REF_NAME author=$GITLAB_USER_LOGIN"
+      git push --set-upstream origin "$BRANCH"
+      _repo="${UPLOAD_GITLAB_REPO_URL%.git}"
+      _repo="${_repo%/}"
+      _path="${_repo#*://}"
+      _path="${_path#*/}"
+      _disp="${_path}@${BRANCH}"
+      _tree="${_repo}/-/tree/${BRANCH}"
+      if [ -n "$TARGET_DIR" ]; then
+        _disp="${_disp}/${TARGET_DIR}"
+        _tree="${_tree}/${TARGET_DIR}"
+      fi
+      _url=""
+      case "$_repo" in
+        https://*) _url="$_tree" ;;
+      esac
+      printf 'git\t%s\t%s\n' "$_disp" "$_url" >> "${CI_PROJECT_DIR}/ci-notify-artifacts.tsv" || true
+      echo "已推送制品到 $UPLOAD_GITLAB_REPO_URL ($BRANCH)"
+  artifacts:
+    paths:
+      - ci-notify-artifacts.tsv
+    expire_in: 1 day
+    when: on_success

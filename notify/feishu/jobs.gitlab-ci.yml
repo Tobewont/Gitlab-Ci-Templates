@@ -1,0 +1,20 @@
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/notify/variables.gitlab-ci.yml'
+  - local: '/notify/jobs.gitlab-ci.yml'
+  - local: '/notify/feishu/variables.gitlab-ci.yml'
+
+# 原子能力：飞书自定义机器人通知（群 webhook 直连）
+# Webhook 在群设置 → 群机器人 → 自定义机器人 中创建。
+# 开启「签名校验」时填写 NOTIFY_FEISHU_SIGN_SECRET。
+.notify-feishu:
+  extends: .notify-base
+  variables:
+    NOTIFY_CHANNEL: "feishu"
+  script:
+    - !reference [.notify-send-channels, script]
+
+# 与 .notify-feishu 相同
+.notify-feishu-bot:
+  extends: .notify-feishu

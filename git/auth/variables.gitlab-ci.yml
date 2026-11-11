@@ -1,0 +1,19 @@
+variables:
+  # ── .git-https-auth ─────────────────────────────────────────
+  # 默认引用 base；Git 实例不是 git.example.com 时覆盖这三个变量即可
+  # [用户可配] HTTPS 认证作用域名
+  GIT_HTTPS_DOMAIN: "$GIT_DOMAIN"
+  # [用户可配] HTTPS 认证用户名
+  GIT_HTTPS_USERNAME: "$GITLAB_USERNAME"
+  # [用户可配] HTTPS 认证 token（CI/CD Variables masked 注入；默认复用 GITLAB_TOKEN）
+  GIT_HTTPS_TOKEN: "$GITLAB_TOKEN"
+
+  # ── .submodule-checkout ─────────────────────────────────────
+  # [用户可配] 私有子模块检出开关
+  GIT_SUBMODULE_CHECKOUT_ENABLE: "true"
+  # [用户可配] 子模块所在 Git 域名（默认复用 GIT_DOMAIN）
+  GIT_SUBMODULE_DOMAIN: "$GIT_DOMAIN"
+  # [用户可配] 子模块认证用户名（默认复用 GITLAB_USERNAME）
+  GIT_SUBMODULE_USERNAME: "$GITLAB_USERNAME"
+  # [用户可配] 子模块认证 token（默认复用 GITLAB_TOKEN；需单独账号时覆盖）
+  GIT_SUBMODULE_TOKEN: "$GITLAB_TOKEN"

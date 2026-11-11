@@ -1,0 +1,55 @@
+# 公共模板通用基础镜像（CI_BASE_IMAGE）
+# 承载：notify / common / git / checks / security / deploy / upload / quality 等轻量胶水类原子能力
+# 语言编译环境不进此镜像（走 build/* 专用镜像）
+#
+# 构建与推送（在仓库根目录执行）：
+#   docker build -f Dockerfile.ci-base -t registry.example.com/cicd/ci-base:alpine3.23.5 .
+#   docker push registry.example.com/cicd/ci-base:alpine3.23.5
+#
+# 国内构建如遇 apk 源慢，可加构建参数：
+#   docker build -f Dockerfile.ci-base --build-arg APK_MIRROR=mirrors.aliyun.com -t registry.example.com/cicd/ci-base:alpine3.23.5 .
+
+FROM alpine:3.23.5
+
+ARG APK_MIRROR=dl-cdn.alpinelinux.org
+ARG KUBECTL_VERSION=v1.30.3
+ARG HELM_VERSION=v3.15.3
+# 下载源：默认国内可达镜像（Azure中国 / 华为云，已实测 200）。海外构建可覆盖为官方源
+ARG KUBECTL_BASE=https://mirror.azure.cn/kubernetes/kubectl/${KUBECTL_VERSION}/bin/linux/amd64
+ARG HELM_URL=https://mirrors.huaweicloud.com/helm/${HELM_VERSION}/helm-${HELM_VERSION}-linux-amd64.tar.gz
+
+ENV LANG=en_US.UTF-8 \
+    TZ=Asia/Shanghai \
+    PIP_NO_CACHE_DIR=1
+
+# 单层安装：apk 用 --no-cache 不留 index；kubectl/helm 下载后清临时文件；
+# 结尾统一清 apk 缓存、pip 缓存、临时目录，保证镜像小 + 层少。
+RUN set -eux; \
+    sed -i "s|dl-cdn.alpinelinux.org|${APK_MIRROR}|g" /etc/apk/repositories; \
+    apk add --no-cache \
+      bash coreutils grep sed gawk findutils diffutils procps tzdata less \
+      curl wget netcat-openbsd openssh-client sshpass rsync lftp \
+      iputils bind-tools openssl ca-certificates \
+      zip unzip xz zstd \
+      jq yq gettext xmlstarlet \
+      git git-lfs \
+      python3 py3-pip \
+      docker-cli; \
+    update-ca-certificates; \
+    git lfs install --system; \
+    # kubectl（带重试）\
+    curl -fsSL --retry 3 --retry-delay 2 "${KUBECTL_BASE}/kubectl" -o /usr/local/bin/kubectl; \
+    chmod +x /usr/local/bin/kubectl; \
+    # helm：先完整下载校验再解包，避免管道拿到半截数据（带重试）\
+    curl -fsSL --retry 3 --retry-delay 2 "${HELM_URL}" -o /tmp/helm.tgz; \
+    tar -xz --strip-components=1 -C /usr/local/bin -f /tmp/helm.tgz linux-amd64/helm; \
+    # 清理所有缓存与临时残留 \
+    rm -rf /var/cache/apk/* /root/.cache /tmp/* /var/tmp/*; \
+    # 构建期自检：关键命令缺失即失败 \
+    for c in bash curl wget git jq yq envsubst ssh scp sshpass rsync lftp nc ping \
+             openssl zip unzip xz zstd tar python3 pip3 docker kubectl helm; do \
+      command -v "$c" >/dev/null || { echo "MISSING: $c"; exit 1; }; \
+    done; \
+    echo "ci-base image OK"
+
+CMD ["/bin/bash"]

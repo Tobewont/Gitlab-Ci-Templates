@@ -1,0 +1,12 @@
+variables:
+  # ── .git-describe ────────────────────────────────────────────
+  # [用户可配] 版本号策略：git-describe（默认，含 tag+距离）/ commit-sha / tag-or-sha
+  GIT_VERSION_STRATEGY: "git-describe"
+  # [用户可配] git describe 附加参数（仅 STRATEGY=git-describe 时生效）
+  GIT_VERSION_DESCRIBE_ARGS: "--long --tags --always"
+
+  # ── .get-commit-keyword ─────────────────────────────────────
+  # [用户可配] 要搜索的 commit message 关键字
+  COMMIT_KEYWORD: ""
+  # [用户可配] 大小写敏感（默认 false 不敏感）
+  COMMIT_KEYWORD_CASE_SENSITIVE: "false"

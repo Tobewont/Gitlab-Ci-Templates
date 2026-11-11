@@ -1,0 +1,61 @@
+# 原子能力：Git 评论（MR notes / Commit comments 统一入口）
+# GIT_COMMENT_TARGET=commit + GIT_COMMENT_BODY 评论 commit；=mr 评论 MR。
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/git/comment/variables.gitlab-ci.yml'
+
+# ── 发送片段：读 body → POST 到 MR notes / Commit comments ──
+.git-comment-post:
+  script:
+    - |
+      # CI 配置保护拦截：guard 失败则跳过（needs 拦不住 when: always 的 job，按状态文件自行判定；文件不存在表示未接入 guard，正常执行）
+      if [ -f .ci-config-guard-result ] && [ "$(cat .ci-config-guard-result 2>/dev/null)" = "blocked" ]; then
+        echo "[skip] CI 配置保护检查未通过（ci-config-guard failed），跳过评论"; exit 0
+      fi
+      if [ -z "$GIT_COMMENT_TOKEN" ]; then
+        echo "[skip] GIT_COMMENT_TOKEN 未配置，跳过评论"; exit 0
+      fi
+      BODY_FILE="${GIT_COMMENT_BODY_FILE:-.git-comment-body}"
+      if [ -s "$BODY_FILE" ]; then
+        BODY=$(cat "$BODY_FILE")
+      else
+        BODY=$(printf '%b' "${GIT_COMMENT_BODY:-}")
+      fi
+      if [ -z "$BODY" ]; then
+        echo "[skip] 评论内容为空，跳过"; exit 0
+      fi
+      command -v curl >/dev/null 2>&1 || apk add --no-cache curl >/dev/null 2>&1
+      command -v python3 >/dev/null 2>&1 || apk add --no-cache python3 >/dev/null 2>&1
+      case "${GIT_COMMENT_TARGET:-mr}" in
+        mr)
+          [ -z "$CI_MERGE_REQUEST_IID" ] && { echo "[skip] 非 MR 流水线，跳过 MR 评论"; exit 0; }
+          URL="$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID/notes"
+          PAYLOAD=$(printf '%s' "$BODY" | python3 -c 'import sys,json; print(json.dumps({"body": sys.stdin.buffer.read().decode("utf-8")}))')
+          ;;
+        commit)
+          URL="$CI_API_V4_URL/projects/$CI_PROJECT_ID/repository/commits/$CI_COMMIT_SHA/comments"
+          PAYLOAD=$(printf '%s' "$BODY" | python3 -c 'import sys,json; print(json.dumps({"note": sys.stdin.buffer.read().decode("utf-8")}))')
+          ;;
+        *)
+          echo "[error] 未知 GIT_COMMENT_TARGET=${GIT_COMMENT_TARGET}（支持 mr/commit）"; exit 1
+          ;;
+      esac
+      RESP=$(curl -sS --max-time 30 -X POST -H "PRIVATE-TOKEN: $GIT_COMMENT_TOKEN" -H "Content-Type: application/json" -d "$PAYLOAD" "$URL" 2>/dev/null || echo "")
+      if printf '%s' "$RESP" | grep -q '"id"'; then
+        echo "已添加 ${GIT_COMMENT_TARGET:-mr} 评论"
+      else
+        echo "[error] 评论发送失败: $(printf '%s' "$RESP" | head -c 200)"; exit 1
+      fi
+
+# ── 评论 job 基座：纯 API 调用，无需源码 ──
+.git-comment:
+  extends: .base-job
+  needs:
+    - job: ci-config-guard
+      optional: true
+  variables:
+    GIT_STRATEGY: none
+    GIT_COMMENT_TARGET: "mr"
+  script:
+    - !reference [.git-comment-post, script]

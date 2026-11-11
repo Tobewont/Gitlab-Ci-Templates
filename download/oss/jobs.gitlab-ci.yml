@@ -1,0 +1,47 @@
+# 原子能力：从阿里云 OSS 下载文件或目录
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/download/oss/variables.gitlab-ci.yml'
+
+stages: [download]
+
+.oss-download:
+  extends: .base-job
+  image:
+    name: $DOWNLOAD_OSS_IMAGE
+    entrypoint: [""]
+  stage: download
+  variables: {STEP_ENABLE: "$DOWNLOAD_OSS_ENABLE"}
+  script:
+    - |
+      set -eu
+      printf '{}\n' > "$DOWNLOAD_OSS_MANIFEST_FILE"; : > "$DOWNLOAD_OSS_DOTENV_FILE"
+      case "$STEP_ENABLE" in false) echo "[skip] OSS download 未启用（DOWNLOAD_OSS_ENABLE=$STEP_ENABLE）"; exit 0 ;; true) ;; *) echo "[error] DOWNLOAD_OSS_ENABLE 必须为 true/false"; exit 1 ;; esac
+      for cmd in ossutil jq sha256sum find mkdir mktemp rm wc tr sed sort awk grep dirname cp mv cat; do command -v "$cmd" >/dev/null 2>&1 || { echo "[error] 镜像缺少命令: $cmd"; exit 1; }; done
+      for name in DOWNLOAD_OSS_ACCESS_KEY_ID DOWNLOAD_OSS_ACCESS_KEY_SECRET DOWNLOAD_OSS_ENDPOINT DOWNLOAD_OSS_BASE_URL DOWNLOAD_OSS_PATHS DOWNLOAD_OSS_DEST_DIR; do eval "value=\${$name:-}"; [ -n "$value" ] || { echo "[error] $name 未配置"; exit 1; }; done
+      case "$DOWNLOAD_OSS_TYPE" in file|directory) ;; *) echo "[error] DOWNLOAD_OSS_TYPE 必须为 file/directory"; exit 1 ;; esac
+      case "$DOWNLOAD_OSS_BASE_URL" in oss://*) ;; *) echo "[error] DOWNLOAD_OSS_BASE_URL 必须为 oss:// URL"; exit 1 ;; esac
+      safe_path() { case "$1" in ''|*[!A-Za-z0-9._/-]*|/*|*//*|.|..|./*|../*|*/./*|*/../*|*/.|*/..) return 1 ;; *) return 0 ;; esac; }
+      safe_path "$DOWNLOAD_OSS_DEST_DIR" || { echo "[error] DEST_DIR 必须是安全相对路径"; exit 1; }
+      case "/$DOWNLOAD_OSS_MANIFEST_FILE" in "/$DOWNLOAD_OSS_DEST_DIR"/*) echo "[error] MANIFEST_FILE 不能位于 DEST_DIR 内"; exit 1 ;; esac
+      case "/$DOWNLOAD_OSS_DOTENV_FILE" in "/$DOWNLOAD_OSS_DEST_DIR"/*) echo "[error] DOTENV_FILE 不能位于 DEST_DIR 内"; exit 1 ;; esac
+      for name in DOWNLOAD_OSS_MAX_FILES DOWNLOAD_OSS_MAX_FILE_BYTES DOWNLOAD_OSS_MAX_TOTAL_BYTES; do eval "value=\${$name}"; case "$value" in *[!0-9]*|'') exit 1 ;; esac; [ "$value" -gt 0 ] || exit 1; done
+      [ ! -e "$DOWNLOAD_OSS_DEST_DIR" ] || { echo "[error] 输出目录已存在"; exit 1; }; mkdir -p "$DOWNLOAD_OSS_DEST_DIR"; work=$(mktemp -d); cleanup() { rm -rf "$work"; }; trap cleanup EXIT HUP INT TERM
+      base=${DOWNLOAD_OSS_BASE_URL%/}
+      if [ "$DOWNLOAD_OSS_TYPE" = file ]; then
+        printf '%s' "$DOWNLOAD_OSS_PATHS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d' | sort -u > "$work/paths"; [ -s "$work/paths" ] || exit 1
+        while IFS= read -r path; do safe_path "$path" || { echo "[error] 非法路径: $path"; exit 1; }; mkdir -p "$DOWNLOAD_OSS_DEST_DIR/$(dirname "$path")"; ossutil -e "$DOWNLOAD_OSS_ENDPOINT" -i "$DOWNLOAD_OSS_ACCESS_KEY_ID" -k "$DOWNLOAD_OSS_ACCESS_KEY_SECRET" cp "$base/$path" "$DOWNLOAD_OSS_DEST_DIR/$path"; done < "$work/paths"
+      else
+        safe_path "$DOWNLOAD_OSS_PATHS" || { echo "[error] 非法 prefix"; exit 1; }; prefix=${DOWNLOAD_OSS_PATHS%/}; ossutil -e "$DOWNLOAD_OSS_ENDPOINT" -i "$DOWNLOAD_OSS_ACCESS_KEY_ID" -k "$DOWNLOAD_OSS_ACCESS_KEY_SECRET" cp -r "$base/$prefix/" "$DOWNLOAD_OSS_DEST_DIR/"
+      fi
+      find "$DOWNLOAD_OSS_DEST_DIR" -type l | grep -q . && { echo "[error] 输出包含符号链接"; exit 1; } || true
+      find "$DOWNLOAD_OSS_DEST_DIR" -type f -print | sort > "$work/files"; count=$(wc -l < "$work/files" | tr -d ' '); [ "$count" -gt 0 ] && [ "$count" -le "$DOWNLOAD_OSS_MAX_FILES" ] || exit 1
+      printf '[]' > "$work/items"; total=0
+      while IFS= read -r file; do size=$(wc -c < "$file" | tr -d ' '); [ "$size" -gt 0 ] && [ "$size" -le "$DOWNLOAD_OSS_MAX_FILE_BYTES" ] || exit 1; total=$((total+size)); [ "$total" -le "$DOWNLOAD_OSS_MAX_TOTAL_BYTES" ] || exit 1; rel=${file#"$DOWNLOAD_OSS_DEST_DIR/"}; safe_path "$rel" || { echo "[error] 下载结果包含不安全路径: $rel"; exit 1; }; sha=$(sha256sum "$file" | awk '{print $1}'); jq --arg path "$rel" --arg sha "$sha" --arg size "$size" '. + [{path:$path,size:($size|tonumber),sha256:$sha}]' "$work/items" > "$work/next"; mv "$work/next" "$work/items"; done < "$work/files"
+      jq --arg source oss --arg type "$DOWNLOAD_OSS_TYPE" --arg output "$DOWNLOAD_OSS_DEST_DIR" '{source:$source,type:$type,output_dir:$output,files:.}' "$work/items" > "$DOWNLOAD_OSS_MANIFEST_FILE"
+      printf 'DOWNLOAD_OUTPUT_DIR=%s\nDOWNLOAD_FILE_COUNT=%s\nDOWNLOAD_MANIFEST_FILE=%s\n' "$DOWNLOAD_OSS_DEST_DIR" "$count" "$DOWNLOAD_OSS_MANIFEST_FILE" > "$DOWNLOAD_OSS_DOTENV_FILE"
+  artifacts:
+    expire_in: "1 day"
+    paths: [$DOWNLOAD_OSS_DEST_DIR, $DOWNLOAD_OSS_MANIFEST_FILE]
+    reports: {dotenv: $DOWNLOAD_OSS_DOTENV_FILE}

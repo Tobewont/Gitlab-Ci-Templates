@@ -1,0 +1,48 @@
+# 原子能力：调用 CD 平台 REST API 触发发布
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/deploy/cd/variables.gitlab-ci.yml'
+
+stages:
+  - deploy
+
+.deploy-cd:
+  extends: .base-job
+  image: $DEPLOY_CD_IMAGE
+  stage: deploy
+  variables:
+    STEP_NAME: "CD Deploy"
+    STEP_ENABLE: "$DEPLOY_CD_ENABLE"
+    # 调 CD 平台 API 下发部署，无需源码：跳过仓库克隆
+    GIT_STRATEGY: none
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（DEPLOY_CD_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      URL="$DEPLOY_CD_URL"
+      if [ -z "$URL" ] || [ -z "$DEPLOY_CD_TOKEN" ] || [ -z "$DEPLOY_CD_BODY" ]; then
+        echo "[skip] DEPLOY_CD_URL / TOKEN / BODY 未配置"; exit 0
+      fi
+      command -v curl >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache curl >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq curl >/dev/null 2>&1)
+      echo "==> POST $URL"
+      RESP=$(curl -sS --max-time 120 -w "\nHTTP_CODE=%{http_code}" \
+        -H "$DEPLOY_CD_TOKEN_HEADER: $DEPLOY_CD_TOKEN" \
+        -H "Content-Type: application/json" \
+        -X POST \
+        -d "$DEPLOY_CD_BODY" \
+        "$URL")
+      echo "响应: $RESP"
+      CODE=$(echo "$RESP" | grep "^HTTP_CODE=" | cut -d= -f2)
+      BODY=$(echo "$RESP" | sed '$d')
+      if [ "$CODE" -lt 200 ] || [ "$CODE" -ge 300 ]; then
+        echo "HTTP $CODE，部署接口调用失败"; exit 1
+      fi
+      if [ -n "$DEPLOY_CD_SUCCESS_FIELD" ] && [ -n "$DEPLOY_CD_SUCCESS_VALUE" ]; then
+        VAL=$(printf '%s' "$BODY" | grep -o "\"$DEPLOY_CD_SUCCESS_FIELD\":[^,}]*" | head -1 | sed "s|\"$DEPLOY_CD_SUCCESS_FIELD\":||;s|\"||g;s| ||g")
+        if [ "$VAL" != "$DEPLOY_CD_SUCCESS_VALUE" ]; then
+          echo "响应字段 $DEPLOY_CD_SUCCESS_FIELD=$VAL，期望 $DEPLOY_CD_SUCCESS_VALUE";  exit 1
+        fi
+      fi
+      echo "CD API 调用成功"

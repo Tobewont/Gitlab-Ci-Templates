@@ -1,0 +1,6 @@
+# security 层变量聚合入口
+include:
+  - local: '/security/trivy/variables.gitlab-ci.yml'
+  - local: '/security/gitleaks/variables.gitlab-ci.yml'
+  - local: '/security/semgrep/variables.gitlab-ci.yml'
+  - local: '/security/checkmarx/variables.gitlab-ci.yml'

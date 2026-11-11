@@ -1,0 +1,192 @@
+# 原子能力：扫描结果汇总
+# 读取各扫描工具报告 → 输出汇总日志 → 按阈值判定 → 评论到 MR 或 commit
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/review/scan-summary/variables.gitlab-ci.yml'
+
+stages:
+  - review
+
+.scan-summary:
+  extends: .base-job
+  image: $REVIEW_SCAN_SUMMARY_IMAGE
+  stage: review
+  when: always
+  variables:
+    STEP_NAME: "Scan Summary"
+    STEP_ENABLE: "$REVIEW_SCAN_SUMMARY_ENABLE"
+  script:
+    - |
+      # CI 配置保护拦截兜底：本 job when: always（上游失败也要汇总），needs 拦不住；
+      #   guard 拦截时其余 job 均未真正执行，汇总无意义，立即退出
+      if [ -f .ci-config-guard-result ] && [ "$(cat .ci-config-guard-result 2>/dev/null)" = "blocked" ]; then
+        echo "[skip] CI 配置保护检查未通过，流水线已被拦截，$STEP_NAME 不执行"; exit 0
+      fi
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（REVIEW_SCAN_SUMMARY_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      if [ -z "$REVIEW_SCAN_SUMMARY_INPUTS" ]; then
+        echo "[skip] REVIEW_SCAN_SUMMARY_INPUTS 未配置"; exit 0
+      fi
+      command -v python3 >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache python3 py3-pip >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get update -qq && apt-get install -y -qq python3 >/dev/null 2>&1)
+      command -v curl >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache curl >/dev/null 2>&1) || true
+      export REVIEW_SCAN_SUMMARY_INPUTS REVIEW_SCAN_FAIL_ON_CRITICAL REVIEW_SCAN_FAIL_ON_MAJOR REVIEW_SCAN_FAIL_ON_MINOR
+      python3 - <<'PYEOF' > .scan-summary.md
+      import os, re, json, sys
+      inputs = os.environ.get("REVIEW_SCAN_SUMMARY_INPUTS", "").strip()
+      SEV_ORDER = ["CRITICAL","MAJOR","MINOR","INFO"]
+      SEV_EMOJI = {"CRITICAL":"🔴","MAJOR":"🟠","MINOR":"🟡","INFO":"⚪"}
+      SEV_MAP = {"CRITICAL":"CRITICAL","HIGH":"MAJOR","MEDIUM":"MINOR","LOW":"INFO",
+                 "error":"MAJOR","warning":"MINOR","info":"INFO",
+                 "E":"MAJOR","W":"MINOR","C":"INFO","R":"MINOR","F":"CRITICAL"}
+      def parse_pylint(path):
+          items = []
+          if not os.path.isfile(path): return items
+          rx = re.compile(r"^(?P<f>[^:]+):(?P<l>\d+):(?P<c>\d+):\s+(?P<code>[A-Z]\d+):\s+(?P<msg>.+)$")
+          with open(path, encoding="utf-8", errors="ignore") as f:
+              for line in f:
+                  m = rx.match(line.strip())
+                  if not m: continue
+                  code = m.group("code")
+                  items.append({"severity": SEV_MAP.get(code[0], "MINOR"), "rule": code, "message": m.group("msg")})
+          return items
+      def parse_eslint(path):
+          items=[]
+          if not os.path.isfile(path): return items
+          try:
+              with open(path, encoding="utf-8") as f: data = json.load(f)
+          except Exception: return items
+          if not isinstance(data, list): return items
+          for fo in data:
+              for m in fo.get("messages",[]):
+                  sev = "MAJOR" if m.get("severity")==2 else "MINOR"
+                  items.append({"severity": sev, "rule": m.get("ruleId") or "eslint", "message": m.get("message","")})
+          return items
+      def parse_trivy(path):
+          items=[]
+          if not os.path.isfile(path): return items
+          try:
+              with open(path, encoding="utf-8") as f: data = json.load(f)
+          except Exception: return items
+          for res in data.get("Results", []) or []:
+              for v in res.get("Vulnerabilities", []) or []:
+                  items.append({"severity": SEV_MAP.get(v.get("Severity","LOW").upper(),"INFO"),
+                                "rule": v.get("VulnerabilityID","CVE"),
+                                "message": f"{v.get('PkgName')}: {v.get('Title','')}"})
+          return items
+      def parse_gitleaks(path):
+          items=[]
+          if not os.path.isfile(path): return items
+          try:
+              with open(path, encoding="utf-8") as f: data = json.load(f)
+          except Exception: return items
+          if not isinstance(data, list): return items
+          for f in data:
+              items.append({"severity":"CRITICAL","rule":f.get("RuleID","secret"),
+                            "message": f.get("Description","secret detected")})
+          return items
+      def parse_semgrep(path):
+          items=[]
+          if not os.path.isfile(path): return items
+          try:
+              with open(path, encoding="utf-8") as f: data = json.load(f)
+          except Exception: return items
+          for r in data.get("results",[]):
+              sev_raw = (r.get("extra",{}).get("severity") or "INFO").upper()
+              items.append({"severity": SEV_MAP.get(sev_raw,"INFO"),
+                            "rule": r.get("check_id","semgrep"),
+                            "message": r.get("extra",{}).get("message","")})
+          return items
+      PARSERS = {"pylint":parse_pylint,"eslint":parse_eslint,"trivy":parse_trivy,
+                 "gitleaks":parse_gitleaks,"semgrep":parse_semgrep}
+      per_tool = {}
+      for entry in [e.strip() for e in inputs.replace('\n', ',').split(',') if e.strip()]:
+          if ':' not in entry: continue
+          tool, path = entry.split(':', 1)
+          tool = tool.strip().lower(); path = path.strip()
+          fn = PARSERS.get(tool)
+          if not fn:
+              per_tool[tool] = ("[unknown tool]", [])
+              continue
+          if not os.path.isfile(path):
+              per_tool[tool] = ("[report not found]", [])
+              continue
+          per_tool[tool] = (path, fn(path))
+      # 汇总
+      total_by_sev = {s:0 for s in SEV_ORDER}
+      lines = ["# 🔍 扫描结果汇总", ""]
+      lines.append("| 工具 | 报告 | 严重 🔴 | 高 🟠 | 中 🟡 | 低 ⚪ | 总数 |")
+      lines.append("|---|---|---:|---:|---:|---:|---:|")
+      for tool, (path, items) in per_tool.items():
+          per_sev = {s:0 for s in SEV_ORDER}
+          for it in items:
+              per_sev[it["severity"]] = per_sev.get(it["severity"],0) + 1
+              total_by_sev[it["severity"]] = total_by_sev.get(it["severity"],0) + 1
+          lines.append(f"| **{tool}** | `{path}` | {per_sev['CRITICAL']} | {per_sev['MAJOR']} | {per_sev['MINOR']} | {per_sev['INFO']} | {sum(per_sev.values())} |")
+      lines.append("")
+      lines.append(f"**总计**: 🔴 {total_by_sev['CRITICAL']} / 🟠 {total_by_sev['MAJOR']} / 🟡 {total_by_sev['MINOR']} / ⚪ {total_by_sev['INFO']}")
+      # 阈值判定（容错：非整数输入回退为 0=不阻断，避免误传布尔/空值时崩溃）
+      def _int_env(name):
+          raw = os.environ.get(name, "0").strip()
+          try:
+              return int(raw)
+          except ValueError:
+              sys.stderr.write(f"[warn] {name}={raw!r} 非整数，按 0(不阻断)处理\n")
+              return 0
+      th_c = _int_env("REVIEW_SCAN_FAIL_ON_CRITICAL")
+      th_j = _int_env("REVIEW_SCAN_FAIL_ON_MAJOR")
+      th_n = _int_env("REVIEW_SCAN_FAIL_ON_MINOR")
+      fail = False; reasons = []
+      if th_c and total_by_sev["CRITICAL"] > th_c: fail=True; reasons.append(f"CRITICAL {total_by_sev['CRITICAL']} > 阈值 {th_c}")
+      if th_j and total_by_sev["MAJOR"]    > th_j: fail=True; reasons.append(f"MAJOR {total_by_sev['MAJOR']} > 阈值 {th_j}")
+      if th_n and total_by_sev["MINOR"]    > th_n: fail=True; reasons.append(f"MINOR {total_by_sev['MINOR']} > 阈值 {th_n}")
+      if fail:
+          lines.append("")
+          lines.append(f"**❌ Pipeline 阻断**：{'; '.join(reasons)}")
+      else:
+          lines.append("")
+          lines.append("**✅ 扫描结果在阈值内**")
+      # top 10 严重问题
+      severe = [it for tool,(p,items) in per_tool.items() for it in items if it["severity"] in ("CRITICAL","MAJOR")][:10]
+      if severe:
+          lines.append("")
+          lines.append("### 前 10 个严重问题")
+          for it in severe:
+              e = SEV_EMOJI.get(it["severity"],"")
+              lines.append(f"- {e} `{it['rule']}` {it['message']}")
+      md = "\n".join(lines)
+      print(md)
+      # 判定结果通过 exit code 表达
+      sys.stderr.write("FAIL\n" if fail else "OK\n")
+      sys.exit(2 if fail else 0)
+      PYEOF
+      SCAN_RC=$?
+      echo ""
+      echo "==== 汇总报告 ===="
+      cat .scan-summary.md
+      echo "=================="
+      # 评论到 MR 或 commit
+      if [ "$REVIEW_SCAN_SUMMARY_POST_COMMENT" = "true" ] && [ -n "$REVIEW_SCAN_SUMMARY_GITLAB_TOKEN" ]; then
+        NOTE=$(cat .scan-summary.md | awk 'BEGIN{ORS=""; printf "\""} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\r/,""); if (NR>1) printf "\\n"; printf "%s", $0} END{printf "\""}')
+        if [ -n "$CI_MERGE_REQUEST_IID" ]; then
+          echo "==> 评论到 MR !$CI_MERGE_REQUEST_IID"
+          curl -sS --max-time 30 -X POST -H "PRIVATE-TOKEN: $REVIEW_SCAN_SUMMARY_GITLAB_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"body\":$NOTE}" \
+            "$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID/notes" \
+            -o /dev/null && echo "  评论完成" || echo "  评论失败（忽略）"
+        else
+          echo "==> 评论到 commit $CI_COMMIT_SHORT_SHA"
+          curl -sS --max-time 30 -X POST -H "PRIVATE-TOKEN: $REVIEW_SCAN_SUMMARY_GITLAB_TOKEN" \
+            --data-urlencode "note=$(cat .scan-summary.md)" \
+            "$CI_API_V4_URL/projects/$CI_PROJECT_ID/repository/commits/$CI_COMMIT_SHA/comments" \
+            -o /dev/null && echo "  评论完成" || echo "  评论失败（忽略）"
+        fi
+      fi
+      exit $SCAN_RC
+  artifacts:
+    when: always
+    paths:
+      - .scan-summary.md
+    expire_in: "7 days"

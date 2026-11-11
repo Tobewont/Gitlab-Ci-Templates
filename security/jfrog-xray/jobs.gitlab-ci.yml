@@ -1,0 +1,36 @@
+# 原子能力：JFrog Xray 依赖漏洞扫描
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/security/jfrog-xray/variables.gitlab-ci.yml'
+
+stages:
+  - security
+
+.jfrog-xray:
+  extends: .base-job
+  image: $SEC_JFROG_IMAGE
+  stage: security
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "JFrog Xray"
+    STEP_ENABLE: "$SEC_JFROG_XRAY_ENABLE"
+  script:
+    - !reference [.skip-if-disabled, script]
+    - |
+      if [ -z "$SEC_JFROG_URL" ] || [ -z "$SEC_JFROG_TOKEN" ]; then
+        echo "[skip] SEC_JFROG_URL / SEC_JFROG_TOKEN 未配置"; exit 0
+      fi
+      jf config add xk --url="$SEC_JFROG_URL" --access-token="$SEC_JFROG_TOKEN" --interactive=false --overwrite=true
+      jf xr "$SEC_JFROG_XRAY_TYPE" --format=json > xray-report.json || true
+      cat xray-report.json 2>/dev/null || true
+  artifacts:
+    when: always
+    paths:
+      - xray-report.json
+    expire_in: "7 days"

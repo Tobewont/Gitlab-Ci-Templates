@@ -1,0 +1,24 @@
+variables:
+  # [用户可配] 执行镜像（需含 git + yq 或 sed）
+  DEPLOY_GITOPS_IMAGE: "$CI_BASE_IMAGE"
+  # [用户可配] 部署开关
+  DEPLOY_GITOPS_ENABLE: "true"
+  # [用户可配] GitOps 仓库 URL（Argo CD / Flux 监听的仓）
+  DEPLOY_GITOPS_REPO_URL: ""
+  # [用户可配] 目标分支
+  DEPLOY_GITOPS_BRANCH: "main"
+  # [用户可配] GitOps 仓的写入凭据（GitLab CI/CD Variables masked 注入）
+  DEPLOY_GITOPS_USERNAME: "$GITLAB_USERNAME"
+  DEPLOY_GITOPS_TOKEN: ""
+  # [用户可配] 要修改的 yaml 文件路径（相对 GitOps 仓根）
+  DEPLOY_GITOPS_YAML_FILE: ""
+  # [用户可配] yq 表达式定位镜像字段（默认 Deployment 主容器）
+  # 例：.spec.template.spec.containers[0].image
+  DEPLOY_GITOPS_IMAGE_FIELD: ".spec.template.spec.containers[0].image"
+  # [用户可配] 新镜像完整引用（如 registry.example.com/myapp/svc:v1.2.3）
+  DEPLOY_GITOPS_NEW_IMAGE: ""
+  # [用户可配] Git 提交作者
+  DEPLOY_GITOPS_AUTHOR_NAME: "gitlab-ci"
+  DEPLOY_GITOPS_AUTHOR_EMAIL: "ci@example.com"
+  # [用户可配] 提交信息。可引用 DEPLOY_GITOPS_* 与 CI_* 变量
+  DEPLOY_GITOPS_COMMIT_MESSAGE: "gitops: [$CI_PROJECT_NAME] update $DEPLOY_GITOPS_YAML_FILE -> $DEPLOY_GITOPS_NEW_IMAGE (commit=$CI_COMMIT_SHORT_SHA)"

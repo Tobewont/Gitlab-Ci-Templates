@@ -1,0 +1,38 @@
+# 原子能力：Semgrep 代码模式扫描
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/security/semgrep/variables.gitlab-ci.yml'
+
+stages:
+  - security
+
+# Semgrep 代码模式扫描
+.semgrep:
+  extends: .base-job
+  image: $SEC_SEMGREP_IMAGE
+  stage: security
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "Semgrep"
+    STEP_ENABLE: "$SEC_SEMGREP_ENABLE"
+  script:
+    - !reference [.skip-if-disabled, script]
+    - |
+      semgrep scan \
+        --config "$SEC_SEMGREP_CONFIG" \
+        --json --output semgrep-report.json \
+        --error --disable-version-check
+      RC=$?
+      semgrep scan --config "$SEC_SEMGREP_CONFIG" --disable-version-check || true
+      exit "$SEC_SEMGREP_EXIT_CODE"
+  artifacts:
+    when: always
+    paths:
+      - semgrep-report.json
+    expire_in: "7 days"

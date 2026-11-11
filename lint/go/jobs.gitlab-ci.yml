@@ -1,0 +1,123 @@
+# 原子能力：Go 静态检查（go vet / golangci-lint）
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/git/variables.gitlab-ci.yml'
+  - local: '/git/jobs.gitlab-ci.yml'
+  - local: '/lint/go/variables.gitlab-ci.yml'
+
+stages:
+  - lint
+
+# ── 能力基座：镜像 + 取变更文件（组装 base 能力）──────────────────
+.go-lint-base:
+  extends: .base-job
+  image: $LINT_GO_IMAGE
+  stage: lint
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_FILE_GLOB: '\.go$'     # 供 .filter-changed-files 复用
+  before_script:
+    - apk add --no-cache git bash >/dev/null 2>&1 || true
+    - !reference [.get-changed-files, before_script]
+
+# ── 原子能力：go vet ───────────────────────────────────────────────
+# 组装 = 禁用则跳过 + 过滤 .go + 一条 go vet 命令。
+# STEP_ARTIFACT 默认空 → lint 场景不产 JSON；compliance 场景继承时赋值即产 JSON。
+.go-vet:
+  extends: .go-lint-base
+  variables:
+    STEP_NAME: "go vet"
+    STEP_ENABLE: "$LINT_GO_VET_ENABLE"
+  script:
+    - !reference [.skip-if-disabled, script]
+    - !reference [.filter-changed-files, script]
+    - |
+      PKGS=$(echo "$STEP_MATCHED_FILES" | xargs -I {} dirname {} | sort -u | sed 's|^|./|' | tr '\n' ' ')
+      if go vet $PKGS; then
+        [ -n "$STEP_ARTIFACT" ] && echo '[]' > "$STEP_ARTIFACT"
+      else
+        RC=$?
+        [ -n "$STEP_ARTIFACT" ] && echo '[{"capability":"go-vet","failed":true}]' > "$STEP_ARTIFACT"
+        exit $RC
+      fi
+
+# ── 原子能力：golangci-lint ────────────────────────────────────────
+# 组装 = 禁用则跳过 + 过滤 .go + 一条 golangci-lint 命令。
+# LINT_GO_GOLANGCI_SONAR_REPORT=true 时另写 JSON 报告，退出码仍是 golangci-lint 的退出码。
+.golangci-lint:
+  extends: .go-lint-base
+  variables:
+    STEP_NAME: "golangci-lint"
+    STEP_ENABLE: "$LINT_GO_GOLANGCI_ENABLE"
+  script:
+    - !reference [.skip-if-disabled, script]
+    - !reference [.filter-changed-files, script]
+    - |
+      ARGS=""
+      [ -n "$LINT_GO_GOLANGCI_CONFIG" ] && [ -f "$LINT_GO_GOLANGCI_CONFIG" ] && ARGS="-c $LINT_GO_GOLANGCI_CONFIG"
+      if [ "$LINT_GO_GOLANGCI_SONAR_REPORT" = "true" ]; then
+        mkdir -p "$(dirname "$LINT_GO_GOLANGCI_SONAR_REPORT_PATH")"
+        set +e
+        echo "$STEP_MATCHED_FILES" | xargs golangci-lint run $ARGS \
+          --output.text.path stdout \
+          --output.json.path "$LINT_GO_GOLANGCI_SONAR_REPORT_PATH"
+        RC=$?
+        set -e
+        [ -s "$LINT_GO_GOLANGCI_SONAR_REPORT_PATH" ] || echo '{"Issues":[]}' > "$LINT_GO_GOLANGCI_SONAR_REPORT_PATH"
+        exit $RC
+      fi
+      echo "$STEP_MATCHED_FILES" | xargs golangci-lint run $ARGS
+  artifacts:
+    when: always
+    paths:
+      - "$LINT_GO_GOLANGCI_SONAR_REPORT_PATH"
+    expire_in: "1 day"
+
+# ── 原子能力：revive ───────────────────────────────────────────────
+# 组装 = 禁用则跳过 + 过滤 .go + revive 命令 → checkstyle 报告。
+.revive:
+  extends: .go-lint-base
+  image: $LINT_GO_REVIVE_IMAGE
+  variables:
+    STEP_NAME: "revive"
+    STEP_ENABLE: "$LINT_GO_REVIVE_ENABLE"
+  script:
+    - !reference [.skip-if-disabled, script]
+    - !reference [.filter-changed-files, script]
+    - |
+      ARGS=""
+      [ -n "$LINT_GO_REVIVE_CONFIG" ] && [ -f "$LINT_GO_REVIVE_CONFIG" ] && ARGS="-config $LINT_GO_REVIVE_CONFIG"
+      revive $ARGS -formatter checkstyle ./... > revive-report.xml || true
+      cat revive-report.xml 2>/dev/null || true
+  artifacts:
+    when: always
+    paths:
+      - revive-report.xml
+    expire_in: "7 days"
+
+# Go 引用检测（依赖 goimportcheck 工具）
+.go-import-check:
+  extends: .base-job
+  image: $LINT_GO_IMPORT_CHECK_IMAGE
+  stage: lint
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "Go Import Check"
+    STEP_ENABLE: "$LINT_GO_IMPORT_CHECK_ENABLE"
+  script:
+    - !reference [.skip-if-disabled, script]
+    - |
+      if command -v goimportcheck >/dev/null 2>&1; then
+        goimportcheck ./...
+      else
+        echo "goimportcheck 未在镜像内; 请覆盖 LINT_GO_IMPORT_CHECK_IMAGE 或在业务侧脚本中提供"; exit 1
+      fi

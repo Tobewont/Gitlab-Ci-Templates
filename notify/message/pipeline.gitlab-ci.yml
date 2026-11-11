@@ -1,0 +1,34 @@
+# 场景文案：流水线 / 构建 / 制品上传 / 制品下载
+#   四者正文骨架一致，仅场景名不同，故合并于本文件。
+#   .notify-msg-pipeline 兼作未知场景的兜底。
+#   各片段自带场景守卫：.notify-build-message 会按顺序引用全部场景片段，
+#   只有匹配 NOTIFY_SCENARIO 的那一个真正赋值。
+#   产出 _SCN（场景名）/ _EXTRA（附加行），交由 .notify-msg-default 拼装正文。
+.notify-msg-pipeline:
+  script:
+    - |
+      case "${NOTIFY_SCENARIO:-pipeline}" in
+        build|upload|download|deploy|scan|review|compliance|smoke) ;;
+        *) _SCN="流水线"; _EXTRA=""; export _SCN _EXTRA ;;
+      esac
+
+.notify-msg-build:
+  script:
+    - |
+      if [ "${NOTIFY_SCENARIO:-pipeline}" = "build" ]; then
+        _SCN="构建"; _EXTRA=""; export _SCN _EXTRA
+      fi
+
+.notify-msg-upload:
+  script:
+    - |
+      if [ "${NOTIFY_SCENARIO:-pipeline}" = "upload" ]; then
+        _SCN="制品上传"; _EXTRA=""; export _SCN _EXTRA
+      fi
+
+.notify-msg-download:
+  script:
+    - |
+      if [ "${NOTIFY_SCENARIO:-pipeline}" = "download" ]; then
+        _SCN="制品下载"; _EXTRA=""; export _SCN _EXTRA
+      fi

@@ -1,0 +1,41 @@
+variables:
+  # [用户可配] JS/TS 静态检查执行镜像
+  # [用户可配] lint 运行镜像。默认预装镜像（内置 eslint/@typescript-eslint/prettier），免 npm install。
+  #   如需换原生 node 镜像，覆盖为 node:xx 即可（此时回退 npm install 逻辑）。
+  LINT_JS_IMAGE: "registry.example.com/library/node:24.12.0"
+  # [用户可配] 预装工具目录。留空时脚本运行时探测容器内 $LINT_TOOLS_DIR（预装镜像内置 /opt/lint-tools），
+  #   命中则免 npm install 并据此解析 eslint 插件；探测不到（如原生 node 镜像）时回退 npm install。
+  LINT_JS_TOOLS_DIR: ""
+  # [用户可配] ESLint 开关
+  LINT_JS_ESLINT_ENABLE: "true"
+  # [用户可配] Prettier 格式化检查开关
+  LINT_JS_PRETTIER_ENABLE: "false"
+  # [用户可配] Prettier 检查目标（默认变更的 .js/.ts/.jsx/.tsx/.json/.css/.md 文件）
+  LINT_JS_PRETTIER_TARGET: ""
+  # [用户可配] Prettier 配置文件路径（留空则自动读 .prettierrc*）
+  LINT_JS_PRETTIER_CONFIG: ""
+  # [用户可配] Prettier 忽略规则文件
+  LINT_JS_PRETTIER_IGNORE_PATH: ".prettierignore"
+  # [用户可配] 临时装 prettier 用的 npm 源（国内加速）
+  LINT_JS_NPM_REGISTRY: "https://registry.npmmirror.com"
+  # [用户可配] Prettier 无项目配置时用模板库默认兜底（.prettierrc + .prettierignore），默认开启；
+  #            项目自带 .prettierrc*/.prettierignore 时优先用项目的，不覆盖。置 "false" 可关闭兜底。
+  LINT_JS_PRETTIER_DEFAULT_CONFIG: "true"
+
+  # ── .eslint 产 ESLint 原生 JSON 报告（供 .upload-sonar 转 Sonar externalIssues 消费）──
+  # [用户可配] 是否产出 ESLint 原生 JSON 报告（经 artifacts 传给 .upload-sonar）
+  LINT_JS_ESLINT_SONAR_REPORT: "false"
+  # [用户可配] ESLint 原生 JSON 报告路径（.upload-sonar 的 QUALITY_UPLOAD_SONAR_INPUTS 用 eslint:<此路径> 引用）
+  LINT_JS_ESLINT_SONAR_REPORT_PATH: "eslint-report.json"
+
+  # [用户可配] ESLint 无项目配置时，用模板库默认 .eslintrc 兜底（默认开启），
+  #            项目自带 .eslintrc* 时优先用项目的，不覆盖。置 "false" 可关闭兜底。
+  LINT_JS_ESLINT_DEFAULT_CONFIG: "true"
+  # [用户可配] node_modules 缺插件时自动 npm install 安装 eslint 依赖（无 node_modules 的仓库需开启）
+  LINT_JS_ESLINT_AUTO_INSTALL: "true"
+  # [用户可配] 拉取模板文件的 GitLab API token。默认 GITLAB_TOKEN；为空时用 CI_JOB_TOKEN
+  LINT_JS_GITLAB_TOKEN: "$GITLAB_TOKEN"
+  # [内部] 模板仓路径（含命名空间）；preset/默认配置实体文件运行时经 GitLab API 从此仓拉取（单一事实源）
+  LINT_JS_PRESET_PROJECT: "group/gitlab-ci-templates"
+  # [用户可配] 拉取 preset/默认配置文件的模板仓 ref
+  LINT_JS_PRESET_BRANCH: "main"

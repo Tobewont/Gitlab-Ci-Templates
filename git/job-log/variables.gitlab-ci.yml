@@ -1,0 +1,18 @@
+variables:
+  # ── .git-job-log（按 job 名拉取 CI 日志并提取内容）───────────
+  # [用户可配] GitLab API token。默认 GITLAB_TOKEN
+  GIT_JOB_LOG_TOKEN: "$GITLAB_TOKEN"
+  # [用户可配] 目标 job 名（拉取其 trace 日志）
+  GIT_JOB_LOG_JOB: ""
+  # [用户可配] 提取行的正则（Python re，行级匹配）。留空则不提取（输出空）
+  GIT_JOB_LOG_MATCH: ""
+  # [用户可配] 排除行的正则（命中则丢弃，可选）
+  GIT_JOB_LOG_EXCLUDE: ""
+  # [用户可配] 每行清洗：把命中此正则的前缀部分删掉（可选）
+  GIT_JOB_LOG_STRIP: ""
+  # [用户可配] 提取结果的拼接分隔符
+  GIT_JOB_LOG_JOINER: "、"
+  # [用户可配] 最多保留条数（防评论/输出过长）
+  GIT_JOB_LOG_MAX: "50"
+  # [用户可配] 结果输出文件
+  GIT_JOB_LOG_OUTPUT: ".git-job-log"

@@ -1,0 +1,14 @@
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/notify/variables.gitlab-ci.yml'
+  - local: '/notify/jobs.gitlab-ci.yml'
+  - local: '/notify/webhook/variables.gitlab-ci.yml'
+
+# 通用 Webhook。POST JSON {"text": "<标题与正文>"} 到 NOTIFY_WEBHOOK_URL。
+.notify-webhook:
+  extends: .notify-base
+  variables:
+    NOTIFY_CHANNEL: "webhook"
+  script:
+    - !reference [.notify-send-channels, script]

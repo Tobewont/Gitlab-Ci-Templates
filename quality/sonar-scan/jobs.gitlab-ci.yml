@@ -1,0 +1,108 @@
+# 原子能力：SonarQube 代码质量扫描
+# 扫描地址与 token 由 QUALITY_SONAR_HOST_URL / QUALITY_SONAR_TOKEN 配置
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/quality/sonar/variables.gitlab-ci.yml'
+  - local: '/quality/sonar-scan/variables.gitlab-ci.yml'
+
+stages:
+  - quality
+
+.sonar-scan:
+  extends: .base-job
+  image: $QUALITY_SONAR_IMAGE
+  stage: quality
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  cache:
+    key: "$CI_PROJECT_NAME-sonar"
+    paths:
+      - .sonar/cache
+  variables:
+    STEP_NAME: "SonarQube"
+    STEP_ENABLE: "$QUALITY_SONAR_ENABLE"
+    # 扫描器缓存（分析引擎/JRE index）落进项目目录以便 cache 复用
+    SONAR_USER_HOME: "$CI_PROJECT_DIR/.sonar"
+  script:
+    - |
+      : > sonar-scan.env
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（QUALITY_SONAR_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      # CI 配置保护拦截：guard 失败则跳过（needs 拦不住 when: always 的 job，按状态文件自行判定；文件不存在表示未接入 guard，正常执行）
+      if [ -f .ci-config-guard-result ] && [ "$(cat .ci-config-guard-result 2>/dev/null)" = "blocked" ]; then
+        echo "[skip] CI 配置保护检查未通过（ci-config-guard failed），跳过 $STEP_NAME"; exit 0
+      fi
+
+      SONAR_URL="${QUALITY_SONAR_HOST_URL:-https://sonarqube.example.com}"
+      SONAR_URL="${SONAR_URL%/}"
+      SONAR_WEB="$SONAR_URL"
+      if [ -z "$SONAR_URL" ]; then
+        echo "[fail] QUALITY_SONAR_HOST_URL 未配置"; exit 1
+      fi
+      echo "==> 扫描地址: $SONAR_URL"
+      echo "==> 报告页面: $SONAR_WEB/dashboard?id=$QUALITY_SONAR_PROJECT_KEY"
+
+      SONAR_TOKEN="${QUALITY_SONAR_TOKEN:-}"
+      if [ -z "$SONAR_TOKEN" ]; then
+        echo "[skip] QUALITY_SONAR_TOKEN 未配置（请在 GitLab CI/CD Variables 中 masked 注入）"; exit 0
+      fi
+
+      set -- \
+        "-Dsonar.host.url=$SONAR_URL" \
+        "-Dsonar.login=$SONAR_TOKEN" \
+        "-Dsonar.projectKey=$QUALITY_SONAR_PROJECT_KEY" \
+        "-Dsonar.sources=$QUALITY_SONAR_SOURCES"
+
+      # ── 扫描范围：QUALITY_SONAR_INCLUSIONS_FROM_REPORT 非空时从外部 issues 报告提取扫描文件 ──
+      # QUALITY_SONAR_INCLUSIONS_FROM_REPORT 置为 external issues 报告路径时：
+      #   只扫报告涉及的文件（sonar.inclusions）；报告为空/缺失则 exclusions=**/*，
+      #   跳过内置分析、仅导入外部 issues。
+      if [ -n "$QUALITY_SONAR_INCLUSIONS_FROM_REPORT" ]; then
+        REPORT_FILES=""
+        if [ -f "$QUALITY_SONAR_INCLUSIONS_FROM_REPORT" ]; then
+          # 报告无 issue 时 grep 无匹配会退出 1，pipefail 下需 || true 兜底
+          REPORT_FILES=$(grep -o '"filePath" *: *"[^"]*"' "$QUALITY_SONAR_INCLUSIONS_FROM_REPORT" \
+            | sed 's/.*"filePath" *: *"//; s/"$//' \
+            | sed "s|^$CI_PROJECT_DIR/||" | sort -u | tr '\n' ',' | sed 's/,$//' || true)
+        fi
+        if [ -n "$REPORT_FILES" ]; then
+          echo "==> 快速模式：仅扫描外部报告涉及文件: $REPORT_FILES"
+          set -- "$@" "-Dsonar.inclusions=$REPORT_FILES" "-Dsonar.exclusions=$QUALITY_SONAR_REPORT_MODE_EXCLUSIONS"
+        else
+          echo "==> 快速模式：外部报告无 issue，exclusions=**/* 跳过内置分析，仅导入外部 issues"
+          set -- "$@" "-Dsonar.exclusions=**/*"
+        fi
+      else
+        set -- "$@" "-Dsonar.exclusions=$QUALITY_SONAR_EXCLUSIONS"
+        [ -n "$QUALITY_SONAR_INCLUSIONS" ]           && set -- "$@" "-Dsonar.inclusions=$QUALITY_SONAR_INCLUSIONS"
+      fi
+      # 分支分析仅 Developer Edition 及以上支持；社区版必须留空（QUALITY_SONAR_BRANCH 默认空），否则扫描报错
+      [ -n "$QUALITY_SONAR_BRANCH" ]               && set -- "$@" "-Dsonar.branch.name=$QUALITY_SONAR_BRANCH"
+      [ -n "$QUALITY_SONAR_GO_TEST_REPORT" ]       && set -- "$@" "-Dsonar.go.tests.reportPaths=$QUALITY_SONAR_GO_TEST_REPORT"
+      [ -n "$QUALITY_SONAR_GO_COVERAGE_REPORT" ]   && set -- "$@" "-Dsonar.go.coverage.reportPaths=$QUALITY_SONAR_GO_COVERAGE_REPORT"
+      [ -n "$QUALITY_SONAR_EXTERNAL_ISSUES" ]      && set -- "$@" "-Dsonar.externalIssuesReportPaths=$QUALITY_SONAR_EXTERNAL_ISSUES"
+      [ -n "$QUALITY_SONAR_EXTRA_ARGS" ] && set -- "$@" "$QUALITY_SONAR_EXTRA_ARGS"
+      sonar-scanner "$@"
+
+      # 导出 issues 链接，供下游通知和 MR 裁决使用。地址取 QUALITY_SONAR_HOST_URL。
+      SONAR_WEB_FINAL="$SONAR_WEB"
+      [ -z "$SONAR_WEB_FINAL" ] && SONAR_WEB_FINAL="${QUALITY_SONAR_HOST_URL%/}"
+      if [ -n "$SONAR_WEB_FINAL" ]; then
+        _BRANCH_Q=""
+        [ -n "$QUALITY_SONAR_BRANCH" ] && _BRANCH_Q="branch=$QUALITY_SONAR_BRANCH&"
+        echo "QUALITY_SONAR_ISSUES_URL=$SONAR_WEB_FINAL/project/issues?${_BRANCH_Q}id=$QUALITY_SONAR_PROJECT_KEY&resolved=false" > sonar-scan.env
+        echo "==> issues 链接: $(cut -d= -f2- sonar-scan.env)"
+      fi
+  # 产出 report-task.txt 供 .sonar-quality-gate 通过 needs/artifacts 消费
+  # （门禁 job 经 needs 隔离运行，默认不共享工作区，必须靠 artifacts 传递该文件）
+  artifacts:
+    when: always
+    paths:
+      - "$QUALITY_SONAR_REPORT_TASK"
+    reports:
+      dotenv: sonar-scan.env
+    expire_in: "1 day"

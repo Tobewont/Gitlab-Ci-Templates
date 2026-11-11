@@ -1,0 +1,53 @@
+# 原子能力：归档解包（.archive-unpack）
+#   按文件后缀识别格式，无需配置；打包见 archive/pack/。
+#
+# 变量见同目录 variables.gitlab-ci.yml
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/archive/unpack/variables.gitlab-ci.yml'
+
+stages:
+  - build
+
+.archive-unpack:
+  extends: .base-job
+  image: $ARCHIVE_UNPACK_IMAGE
+  stage: build
+  variables:
+    STEP_NAME: "Archive Unpack"
+    STEP_ENABLE: "$ARCHIVE_UNPACK_ENABLE"
+  script:
+    - |
+      set -eu
+      if [ "${ARCHIVE_UNPACK_ENABLE:-true}" != "true" ]; then
+        echo "[skip] 解包未启用（ARCHIVE_UNPACK_ENABLE=$ARCHIVE_UNPACK_ENABLE）"
+      else
+
+      PATHS="${ARCHIVE_UNPACK_PATHS:-}"
+      [ -n "$PATHS" ] || { echo "[error] ARCHIVE_UNPACK_PATHS 未配置"; exit 1; }
+      DEST="${ARCHIVE_UNPACK_DEST:-.}"
+      STRIP="${ARCHIVE_UNPACK_STRIP:-0}"
+      cd "$CI_PROJECT_DIR"
+      mkdir -p "$DEST"
+
+      for f in $PATHS; do
+        [ -f "$f" ] || { echo "[error] 归档文件不存在: $f"; exit 1; }
+        echo "==> 解包 $f → $DEST"
+        case "$f" in
+          *.tar.gz|*.tgz)   tar -xzf "$f" -C "$DEST" ${STRIP:+--strip-components=$STRIP} ;;
+          *.tar.bz2|*.tbz2) tar -xjf "$f" -C "$DEST" ${STRIP:+--strip-components=$STRIP} ;;
+          *.tar.xz|*.txz)   tar -xJf "$f" -C "$DEST" ${STRIP:+--strip-components=$STRIP} ;;
+          *.tar.zst)        tar --zstd -xf "$f" -C "$DEST" ${STRIP:+--strip-components=$STRIP} ;;
+          *.tar)            tar -xf "$f" -C "$DEST" ${STRIP:+--strip-components=$STRIP} ;;
+          *.zip)            unzip -oq "$f" -d "$DEST" ;;
+          *.gz)             gzip -dkf "$f" ;;
+          *) echo "[error] 无法按后缀识别归档格式: $f"; exit 1 ;;
+        esac
+        [ "${ARCHIVE_UNPACK_REMOVE_SOURCE:-false}" != "true" ] || rm -f "$f"
+      done
+      echo "[ok] 解包完成"
+
+      fi

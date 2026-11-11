@@ -1,0 +1,88 @@
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/quality/sonar/variables.gitlab-ci.yml'
+  - local: '/quality/sonar-gate/variables.gitlab-ci.yml'
+
+stages:
+  - quality
+
+# 原子能力：SonarQube 质量阈门禁（读 report-task.txt → 轮询后台任务 → 查质量阈状态，不通过则失败）
+# 须在 .sonar-scan 之后执行（消费其产出的 report-task.txt）
+.sonar-quality-gate:
+  extends: .base-job
+  image: $QUALITY_SONAR_GATE_IMAGE
+  stage: quality
+  needs:
+    - job: ci-config-guard
+      optional: true
+  variables:
+    STEP_NAME: "SonarQualityGate"
+    STEP_ENABLE: "$QUALITY_SONAR_GATE_ENABLE"
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（QUALITY_SONAR_GATE_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      # CI 配置保护拦截：guard 失败则跳过（needs 拦不住 when: always 的 job，按状态文件自行判定；文件不存在表示未接入 guard，正常执行）
+      if [ -f .ci-config-guard-result ] && [ "$(cat .ci-config-guard-result 2>/dev/null)" = "blocked" ]; then
+        echo "[skip] CI 配置保护检查未通过（ci-config-guard failed），跳过 $STEP_NAME"; exit 0
+      fi
+      if [ ! -f "$QUALITY_SONAR_REPORT_TASK" ]; then
+        echo "[error] 未找到 $QUALITY_SONAR_REPORT_TASK（请确认 .sonar-scan 已执行且通过 needs/artifacts 传递报告）"; exit 1
+      fi
+      CE_TASK_URL=$(grep '^ceTaskUrl=' "$QUALITY_SONAR_REPORT_TASK" | cut -d= -f2-)
+      if [ -z "$CE_TASK_URL" ]; then
+        echo "[error] report-task.txt 中未找到 ceTaskUrl"; exit 1
+      fi
+      SERVER_URL=$(grep '^serverUrl=' "$QUALITY_SONAR_REPORT_TASK" | cut -d= -f2- | sed 's:/*$::')
+      if [ -z "$SERVER_URL" ]; then
+        echo "[error] report-task.txt 中未找到 serverUrl"; exit 1
+      fi
+      EXPECTED_URL=$(printf '%s' "${QUALITY_SONAR_HOST_URL:-https://sonarqube.example.com}" | sed 's:/*$::')
+      if [ "$SERVER_URL" != "$EXPECTED_URL" ]; then
+        echo "[error] report-task.txt serverUrl 与配置的 Sonar 地址不一致"; exit 1
+      fi
+      case "$CE_TASK_URL" in
+        "$SERVER_URL"/api/ce/task\?*) ;;
+        *) echo "[error] ceTaskUrl 与 serverUrl 来源不一致"; exit 1 ;;
+      esac
+      if [ -z "${QUALITY_SONAR_TOKEN:-}${QUALITY_SONAR_ADMIN_TOKEN:-}" ]; then
+        echo "[error] Sonar Quality Gate 缺少 QUALITY_SONAR_TOKEN"; exit 1
+      fi
+      TOKEN="${QUALITY_SONAR_TOKEN:-$QUALITY_SONAR_ADMIN_TOKEN}"
+      if [ -z "$TOKEN" ]; then
+        echo "[error] Sonar Quality Gate 缺少认证 token"; exit 1
+      fi
+      echo "[gate] 轮询后台分析任务: $CE_TASK_URL"
+      DEADLINE=$(( $(date +%s) + QUALITY_SONAR_GATE_TIMEOUT ))
+      ANALYSIS_ID=""
+      while :; do
+        RESP=$(curl --fail --silent --show-error --connect-timeout 10 --max-time 30 -u "$TOKEN:" "$CE_TASK_URL")
+        STATUS=$(printf '%s' "$RESP" | jq -er '.task.status')
+        echo "[gate] task status=$STATUS"
+        if [ "$STATUS" = "SUCCESS" ]; then
+          ANALYSIS_ID=$(printf '%s' "$RESP" | jq -er '.task.analysisId')
+          break
+        fi
+        if [ "$STATUS" = "FAILED" ] || [ "$STATUS" = "CANCELED" ]; then
+          echo "[error] 后台分析任务未成功: $STATUS"; exit 1
+        fi
+        if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+          echo "[error] 等待后台分析超时（${QUALITY_SONAR_GATE_TIMEOUT}s）"; exit 1
+        fi
+        sleep "$QUALITY_SONAR_GATE_INTERVAL"
+      done
+      # host 优先从 report-task.txt 的 serverUrl 读取，兜底用 QUALITY_SONAR_HOST_URL
+      HOST="$SERVER_URL"
+      [ -z "$HOST" ] && HOST="${QUALITY_SONAR_HOST_URL%/}"
+      if [ -z "$HOST" ]; then
+        echo "[error] 无法确定 Sonar host（report-task.txt 无 serverUrl 且 QUALITY_SONAR_HOST_URL 未设）"; exit 1
+      fi
+      GATE=$(curl --fail --silent --show-error --connect-timeout 10 --max-time 30 -u "$TOKEN:" \
+        "$HOST/api/qualitygates/project_status?analysisId=$ANALYSIS_ID" | jq -er '.projectStatus.status')
+      echo "[gate] 质量阈状态: $GATE"
+      if [ "$GATE" != "OK" ]; then
+        echo "[error] 质量阈未通过: $GATE"; exit 1
+      fi
+      echo "[gate] 质量阈通过"

@@ -1,0 +1,62 @@
+variables:
+  # ── 全局开关 ─────────────────────────────────────────────
+  # [用户可配] 是否使用国内镜像源加速（pip / npm / go / apt / maven 等）
+  #   true (默认): pip 走阿里云, npm 走 npmmirror, go 走 goproxy.cn, apt 换阿里 debian 源
+  #   false     : 不改各源配置, 保持容器 / 项目原有配置 (如 .npmrc / pip.conf / GOPROXY 环境变量)
+  USE_CHINA_MIRROR: "true"
+  # ── 全局共享变量 ─────────────────────────────────────────────
+  # [用户可配] 基础镜像（多数轻量任务默认使用）
+  # 通用基础镜像（Dockerfile 见根目录 Dockerfile.ci-base，说明见 docs/ci-base 基础镜像.md）: bash/curl/git/jq/yq/ssh/rsync/lftp/zip/jq/python3/docker-cli/kubectl/helm
+  # 回滚旧镜像: registry.example.com/library/curlimages/curl:8.1.1（仅 curl，缺 git/jq 等命令）
+  CI_BASE_IMAGE: "registry.example.com/cicd/ci-base:alpine3.23.5"
+  # [用户可配] 语言环境
+  CI_LOCALE: "en_US.UTF-8"
+  # [用户可配] 产物保留天数
+  # [用户可配] git 拉取深度，默认 1（浅克隆）：
+  #   .get-changed-files：MR 走 MR API，push/tag 自动 fetch --deepen=50 兜底；
+  #   .get-commit-keyword：before_sha 不可达时只看当前 commit；
+  #   仅 .git-describe（git describe --tags 生成版本号）需要历史，
+  #   相关业务 job 级覆盖 GIT_DEPTH: "0"，或改用 GIT_VERSION_STRATEGY: tag-or-sha/commit-sha。
+  GIT_DEPTH: "1"
+
+
+  # ── 触发控制（.workflow-rules 使用）─────────────────────────
+  # [用户可配] 是否要求 commit message 含关键字才触发构建（true = 必须含，false = 无条件触发）
+  CI_REQUIRE_BUILD_KEYWORD: "false"
+  # 关键字集合由 .workflow-rules 与 common/.build-filter 使用 BUILD_FILTER_KEYWORDS 变量控制
+
+  # ── LLM 参数（review/ai + compliance/.llm-check 共享）───────
+  # [用户可配] LLM 模型名（OpenAI Chat Completions）
+  LLM_MODEL: "gpt-4o-mini"
+  # [用户可配] LLM Chat Completions API URL
+  LLM_API_URL: "https://api.openai.com/v1/chat/completions"
+  # [用户可配] LLM API Key（业务侧在自己仓库 CI/CD Variables masked 注入）
+  LLM_API_KEY: ""
+  # [内部] LLM 采样参数（review/ai）
+  LLM_TEMPERATURE: "0.2"
+  LLM_TOP_P: "0.8"
+
+  # ── GitLab API Token（git/ + notify/ + review/ai 共享）─────
+  # [用户可配] GitLab Personal / Project Access Token（业务侧在自己仓库 CI/CD Variables masked 注入）
+  GITLAB_TOKEN: ""
+  # [用户可配] Git HTTP 认证用户名（upload/gitlab + download/gitlab 共享默认值）
+  #   配合 Personal / Project / Deploy Token 时固定用 oauth2；
+  #   若用 CI Job Token 请改为 gitlab-ci-token。
+  #   两侧能力的 *_GITLAB_USERNAME 默认引用本变量，业务侧通常无需单独配置；
+  #   需要区分上传/下载账号时，仍可显式覆盖 UPLOAD_GITLAB_USERNAME /
+  #   DOWNLOAD_GITLAB_USERNAME（job 级或全局），显式值优先级更高。
+  GITLAB_USERNAME: "oauth2"
+
+  # ── 全局基础设施地址 ────────────────────────────────────────
+  # [用户可配] 内网 Git 域名（.git-https-auth / .submodule-checkout 等能力默认作用域）
+  GIT_DOMAIN: "git.example.com"
+  # [用户可配] CD 平台 URL（.deploy-cd 默认目标）
+  CD_PLATFORM_URL: "https://platform.example.com"
+  # [用户可配] CD 部署 API 路径，与上面的 URL 拼成 DEPLOY_CD_URL
+  CD_DEPLOY_API_PATH: "/api/v1/deploy"
+
+  # ── 国内镜像源（job 内装系统包/依赖时加速；common/.setup-pkg-mirror 使用）──
+  # [用户可配] Alpine apk 源（换 dl-cdn.alpinelinux.org → 国内）
+  PKG_ALPINE_MIRROR: "mirrors.aliyun.com"
+  # [用户可配] Debian/Ubuntu apt 源（换 deb.debian.org / *.ubuntu.com → 国内）
+  PKG_APT_MIRROR: "mirrors.aliyun.com"

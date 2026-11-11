@@ -1,0 +1,196 @@
+# 原子能力：归档打包（.archive-pack）
+#   多格式归档，输出 sha256 与 dotenv；解包见 archive/unpack/。
+#   bzip2 及非 ci-base 镜像缺失的压缩工具自动补装。
+#
+# 变量见同目录 variables.gitlab-ci.yml
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/archive/pack/variables.gitlab-ci.yml'
+
+stages:
+  - build
+
+.archive-pack:
+  extends: .base-job
+  image: $ARCHIVE_PACK_IMAGE
+  stage: build
+  variables:
+    STEP_NAME: "Archive Pack"
+    STEP_ENABLE: "$ARCHIVE_PACK_ENABLE"
+  script:
+    - |
+      set -eu
+      if [ "${ARCHIVE_PACK_ENABLE:-true}" != "true" ]; then
+        echo "[skip] 归档未启用（ARCHIVE_PACK_ENABLE=$ARCHIVE_PACK_ENABLE）"
+      else
+
+      PATHS="${ARCHIVE_PACK_PATHS:-}"
+      FORMAT="${ARCHIVE_PACK_FORMAT:-tar.gz}"
+      [ -n "$PATHS" ] || { echo "[error] ARCHIVE_PACK_PATHS 未配置"; exit 1; }
+
+      cd "$CI_PROJECT_DIR"
+      # PATHS 空格分隔，路径自身不得含空格
+      for p in $PATHS; do
+        [ -e "$p" ] || { echo "[error] 待归档路径不存在: $p（PATHS 空格分隔，路径不得含空格）"; exit 1; }
+      done
+
+      # 压缩工具自检
+      need=""
+      case "$FORMAT" in
+        tar.gz|tgz|tar) command -v tar >/dev/null 2>&1 || need="tar" ;;
+        tar.bz2|tbz2)   command -v bzip2 >/dev/null 2>&1 || need="bzip2" ;;
+        tar.xz|txz)     command -v xz >/dev/null 2>&1 || need="xz" ;;
+        tar.zst)        command -v zstd >/dev/null 2>&1 || need="zstd" ;;
+        zip)            command -v zip >/dev/null 2>&1 || need="zip" ;;
+        gzip|gz)        command -v gzip >/dev/null 2>&1 || need="gzip" ;;
+        *) echo "[error] 不支持的格式: $FORMAT（tar.gz/tgz/tar.bz2/tar.xz/tar.zst/tar/zip/gzip）"; exit 1 ;;
+      esac
+      if [ -n "$need" ]; then
+        (command -v apk >/dev/null 2>&1 && apk add --no-cache "$need" >/dev/null 2>&1) \
+          || (command -v apt-get >/dev/null 2>&1 && apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq "$need" >/dev/null 2>&1) \
+          || { echo "[error] 执行镜像缺少 $need 且无法自动安装"; exit 1; }
+      fi
+
+      # 输出路径：留空按 <项目名>-<版本>.<格式> 生成
+      OUT="${ARCHIVE_PACK_OUTPUT:-}"
+      if [ -z "$OUT" ]; then
+        VER="${ARCHIVE_PACK_VERSION:-${CI_APP_VERSION:-${CI_COMMIT_SHORT_SHA:-latest}}}"
+        case "$FORMAT" in
+          gzip|gz) OUT="" ;;
+          *) OUT="${ARCHIVE_PACK_OUTPUT_DIR:-dist}/${CI_PROJECT_NAME}-${VER}.${FORMAT}" ;;
+        esac
+      fi
+
+      LEVEL="${ARCHIVE_PACK_LEVEL:-}"
+      STRIP="${ARCHIVE_PACK_STRIP:-0}"
+      BASE_DIR="${ARCHIVE_PACK_BASE_DIR:-}"
+
+      # gzip：逐个文件压缩，无归档与 sha256
+      if [ "$FORMAT" = "gzip" ] || [ "$FORMAT" = "gz" ]; then
+        GZ_LIST=""
+        for p in $PATHS; do
+          [ -f "$p" ] || { echo "[error] gzip 格式仅支持文件，目录请用 tar.gz: $p"; exit 1; }
+          gzip -f ${LEVEL:+-$LEVEL} -k "$p"
+          GZ_LIST="${GZ_LIST:+$GZ_LIST }$p.gz"
+          echo "==> $p.gz"
+        done
+        {
+          echo "CI_ARCHIVE_PATH=$GZ_LIST"
+          echo "CI_ARCHIVE_NAME="
+          echo "CI_ARCHIVE_SIZE="
+          echo "CI_ARCHIVE_SHA256="
+        } > "$CI_PROJECT_DIR/${ARCHIVE_PACK_DOTENV_FILE:-archive.env}"
+        echo "[ok] gzip 压缩完成"
+      else
+
+      mkdir -p "$(dirname "$OUT")"
+      if [ -e "$OUT" ] && [ "${ARCHIVE_PACK_OVERWRITE:-true}" != "true" ]; then
+        echo "[error] 输出已存在且未允许覆盖: $OUT"; exit 1
+      fi
+      rm -f "$OUT"
+
+      # BASE_DIR：内容汇聚到临时顶层目录后整体打包
+      SRC_ROOT="$CI_PROJECT_DIR"
+      SRC_LIST="$PATHS"
+      STAGE_DIR=""
+      if [ -n "$BASE_DIR" ]; then
+        [ "$STRIP" = "0" ] || echo "[warn] ARCHIVE_PACK_BASE_DIR 已配置，ARCHIVE_PACK_STRIP=$STRIP 不生效"
+        STAGE_DIR="$(mktemp -d)"
+        mkdir -p "$STAGE_DIR/$BASE_DIR"
+        for p in $PATHS; do cp -a "$p" "$STAGE_DIR/$BASE_DIR/"; done
+        SRC_ROOT="$STAGE_DIR"
+        SRC_LIST="$BASE_DIR"
+        STRIP="0"
+      fi
+
+      EXCLUDES=""
+      for e in ${ARCHIVE_PACK_EXCLUDE:-}; do EXCLUDES="$EXCLUDES --exclude=$e"; done
+
+      case "$FORMAT" in
+        tar.gz|tgz)  COMP="--gzip" ;;
+        tar.bz2|tbz2) COMP="--bzip2" ;;
+        tar.xz|txz)  COMP="--xz" ;;
+        tar.zst)     COMP="--zstd" ;;
+        tar)         COMP="" ;;
+        zip)         COMP="zip" ;;
+      esac
+
+      if [ "$FORMAT" = "zip" ]; then
+        ZIP_EXCL=""
+        for e in ${ARCHIVE_PACK_EXCLUDE:-}; do ZIP_EXCL="$ZIP_EXCL -x $e"; done
+        OUT_ABS="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
+        # zip 无 strip 选项，改用 cd 进子目录
+        ZIP_CWD="$SRC_ROOT"; ZIP_LIST="$SRC_LIST"
+        if [ "$STRIP" -gt 0 ]; then
+          set -- $SRC_LIST
+          if [ "$#" -ne 1 ]; then
+            echo "[warn] ARCHIVE_PACK_STRIP 仅支持单个路径，已忽略（当前 $# 个），请改用 ARCHIVE_PACK_BASE_DIR"
+          else
+            pre=""; sub="$1"; i=0
+            while [ "$i" -lt "$STRIP" ]; do
+              case "$sub" in
+                */*) pre="${pre:+$pre/}${sub%%/*}"; sub="${sub#*/}" ;;
+                *) echo "[warn] 路径 $1 层数不足 STRIP=$STRIP，按 $i 层剥离"; break ;;
+              esac
+              i=$((i+1))
+            done
+            if [ -n "$pre" ]; then ZIP_CWD="$SRC_ROOT/$pre"; ZIP_LIST="$sub"; fi
+          fi
+        fi
+        (cd "$ZIP_CWD" && eval zip -r -q ${LEVEL:+-$LEVEL} '"$OUT_ABS"' $ZIP_LIST $ZIP_EXCL)
+      else
+        [ -z "$LEVEL" ] || export GZIP="-$LEVEL" BZIP2="-$LEVEL" XZ_OPT="-$LEVEL" ZSTD_CLEVEL="$LEVEL"
+        # STRIP>0 时改用 -C 进子目录，归档内不含被剥离前缀
+        TAR_CWD="$SRC_ROOT"; TAR_LIST="$SRC_LIST"
+        if [ "$STRIP" -gt 0 ]; then
+          set -- $SRC_LIST
+          if [ "$#" -ne 1 ]; then
+            echo "[warn] ARCHIVE_PACK_STRIP 仅支持单个路径，已忽略（当前 $# 个），请改用 ARCHIVE_PACK_BASE_DIR"
+          else
+            pre=""; sub="$1"; i=0
+            while [ "$i" -lt "$STRIP" ]; do
+              case "$sub" in
+                */*) pre="${pre:+$pre/}${sub%%/*}"; sub="${sub#*/}" ;;
+                *) echo "[warn] 路径 $1 层数不足 STRIP=$STRIP，按 $i 层剥离"; break ;;
+              esac
+              i=$((i+1))
+            done
+            if [ -n "$pre" ]; then TAR_CWD="$SRC_ROOT/$pre"; TAR_LIST="$sub"; fi
+          fi
+        fi
+        OUT_ABS="$CI_PROJECT_DIR/$OUT"
+        eval tar -C '"$TAR_CWD"' $COMP $EXCLUDES -cf '"$OUT_ABS"' $TAR_LIST
+      fi
+      [ -z "$STAGE_DIR" ] || rm -rf "$STAGE_DIR"
+
+      SIZE="$(wc -c < "$OUT" | tr -d ' ')"
+      echo "==> $OUT ($((SIZE / 1024)) KB)"
+
+      SUM=""
+      if [ "${ARCHIVE_PACK_CHECKSUM:-true}" = "true" ]; then
+        SUM="$(sha256sum "$OUT" | cut -d' ' -f1)"
+        echo "$SUM  $(basename "$OUT")" > "$OUT.sha256"
+        echo "==> sha256: $SUM"
+      fi
+
+      DOTENV="${ARCHIVE_PACK_DOTENV_FILE:-archive.env}"
+      {
+        echo "CI_ARCHIVE_PATH=$OUT"
+        echo "CI_ARCHIVE_NAME=$(basename "$OUT")"
+        echo "CI_ARCHIVE_SIZE=$SIZE"
+        [ -z "$SUM" ] || echo "CI_ARCHIVE_SHA256=$SUM"
+      } > "$CI_PROJECT_DIR/$DOTENV"
+      echo "[ok] 归档完成"
+
+      fi
+      fi
+  artifacts:
+    when: on_success
+    paths:
+      - $ARCHIVE_PACK_ARTIFACT_PATH
+    reports:
+      dotenv: $ARCHIVE_PACK_DOTENV_FILE
+    expire_in: "7 days"

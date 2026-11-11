@@ -1,0 +1,3 @@
+variables:
+  # [用户可配] 通用 Webhook URL（POST 一份简单 JSON {text: "..."}）
+  NOTIFY_WEBHOOK_URL: ""

@@ -1,0 +1,106 @@
+# 原子能力：按 job 名拉取 CI 日志并提取内容（.git-job-log）
+# 提取规则：MATCH 正则命中行入选，EXCLUDE 正则命中行丢弃，STRIP 正则用于清洗命中行（去前缀），
+#   结果去重、限量（MAX）后以 JOINER 拼接写入 OUTPUT 文件；匹配前已剔除 ANSI 控制序列。
+# 各工具（prettier/eslint/clang 等）只需换正则，无需各写脚本。
+#
+# 复用形态一（脚本片段）：其它能力可 !reference [.git-job-log, script] 内联复用。
+# 复用形态二（独立 job）：业务侧 extends: .git-job-log-job 单独跑。
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/git/job-log/variables.gitlab-ci.yml'
+
+# 纯脚本片段：从 $GIT_JOB_LOG_JOB 的日志提取内容到 $GIT_JOB_LOG_OUTPUT
+# 依赖：GIT_JOB_LOG_TOKEN（默认 GITLAB_TOKEN，读 job trace）；curl / python3
+.git-job-log:
+  script:
+    - !reference [.pipeline-jobs-fetch, script]
+    - |
+      : > "${GIT_JOB_LOG_OUTPUT:-.git-job-log}"
+      if [ -z "$GIT_JOB_LOG_JOB" ] || [ -z "$GIT_JOB_LOG_MATCH" ]; then
+        echo "[skip] .git-job-log：GIT_JOB_LOG_JOB 或 GIT_JOB_LOG_MATCH 未配置"; exit 0
+      fi
+      if [ -z "$GIT_JOB_LOG_TOKEN" ]; then
+        echo "[skip] .git-job-log：GIT_JOB_LOG_TOKEN 未配置"; exit 0
+      fi
+      if [ -z "$CI_PIPELINE_ID" ]; then
+        echo "[skip] .git-job-log：CI_PIPELINE_ID 不可用（非流水线环境）"; exit 0
+      fi
+      command -v curl >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache curl >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq curl >/dev/null 2>&1)
+      command -v python3 >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache python3 >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq python3 >/dev/null 2>&1)
+      _pipeline_jobs_fetch "$GIT_JOB_LOG_TOKEN"
+      TARGET_ID=$(printf '%s' "$JOBS_JSON" | GIT_JOB_LOG_JOB="$GIT_JOB_LOG_JOB" python3 -c '
+      import sys, os, json
+      js = json.loads(sys.stdin.read() or "[]")
+      name = os.environ.get("GIT_JOB_LOG_JOB","")
+      cand = [j for j in js if j.get("name")==name]
+      print(cand[-1].get("id","") if cand else "")
+      ')
+      if [ -z "$TARGET_ID" ]; then
+        echo "[skip] .git-job-log：未找到 job=$GIT_JOB_LOG_JOB"; exit 0
+      fi
+      TRACE=$(curl -sS --max-time 30 -H "PRIVATE-TOKEN: $GIT_JOB_LOG_TOKEN" "$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/$TARGET_ID/trace" 2>/dev/null || echo "")
+      printf '%s' "$TRACE" | \
+        PYTHONIOENCODING=utf-8 \
+        GIT_JOB_LOG_MATCH="$GIT_JOB_LOG_MATCH" \
+        GIT_JOB_LOG_EXCLUDE="${GIT_JOB_LOG_EXCLUDE:-}" \
+        GIT_JOB_LOG_STRIP="${GIT_JOB_LOG_STRIP:-}" \
+        GIT_JOB_LOG_JOINER="${GIT_JOB_LOG_JOINER:-、}" \
+        GIT_JOB_LOG_MAX="${GIT_JOB_LOG_MAX:-50}" \
+        GIT_JOB_LOG_OUTPUT="${GIT_JOB_LOG_OUTPUT:-.git-job-log}" \
+        python3 -c '
+      import sys, os, re
+      text = sys.stdin.read()
+      text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+      try:
+          m_re = re.compile(os.environ["GIT_JOB_LOG_MATCH"])
+          ex = os.environ.get("GIT_JOB_LOG_EXCLUDE","").strip()
+          ex_re = re.compile(ex) if ex else None
+          strip = os.environ.get("GIT_JOB_LOG_STRIP","").strip()
+          strip_re = re.compile(strip) if strip else None
+      except re.error as e:
+          print("[warn] .git-job-log 正则非法，输出空结果：%s" % e)
+          with open(os.environ.get("GIT_JOB_LOG_OUTPUT",".git-job-log"), "w", encoding="utf-8") as f:
+              f.write("")
+          sys.exit(0)
+      joiner = os.environ.get("GIT_JOB_LOG_JOINER","、")
+      try:
+          limit = int(os.environ.get("GIT_JOB_LOG_MAX","50"))
+      except ValueError:
+          limit = 50
+      out, seen = [], set()
+      for line in text.split("\n"):
+          line = line.rstrip("\r")
+          if not m_re.search(line):
+              continue
+          if ex_re and ex_re.search(line):
+              continue
+          if strip_re:
+              line = strip_re.sub("", line, count=1)
+          line = line.strip()
+          if not line or line in seen:
+              continue
+          seen.add(line); out.append(line)
+          if len(out) >= limit:
+              break
+      with open(os.environ.get("GIT_JOB_LOG_OUTPUT",".git-job-log"), "w", encoding="utf-8") as f:
+          f.write(joiner.join(out))
+      print("extract %d 条 from job -> %s" % (len(out), os.environ.get("GIT_JOB_LOG_OUTPUT")))
+      '
+      echo "==> 提取结果：$(cat "${GIT_JOB_LOG_OUTPUT:-.git-job-log}" 2>/dev/null | head -c 500)"
+
+# 独立 job 基座：单独跑一次提取（无需源码）
+.git-job-log-job:
+  extends: .base-job
+  variables:
+    GIT_STRATEGY: none
+  needs:
+    - job: ci-config-guard
+      optional: true
+  script:
+    - !reference [.git-job-log, script]
+  artifacts:
+    when: always
+    paths:
+      - $GIT_JOB_LOG_OUTPUT
+    expire_in: "7 days"

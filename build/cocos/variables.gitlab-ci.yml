@@ -1,0 +1,15 @@
+variables:
+  # [用户可配] Cocos Creator 构建执行镜像（业务侧需在镜像内预装 CocosCreator CLI；默认走 CI_BASE_IMAGE）
+  BUILD_COCOS_IMAGE: "$CI_BASE_IMAGE"
+  # [用户可配] Cocos 构建开关
+  BUILD_COCOS_ENABLE: "true"
+  # [用户可配] CocosCreator 可执行程序名或完整路径（Linux/Windows 通用）
+  BUILD_COCOS_BINARY: "CocosCreator"
+  # [用户可配] Cocos 工程根目录（相对仓库根路径）
+  BUILD_COCOS_PROJECT_DIR: "."
+  # [用户可配] Cocos 构建 configPath（Creator 3.x 的构建配置 JSON）
+  BUILD_COCOS_CONFIG_PATH: ""
+  # [用户可配] 额外构建参数（原样附加到 CocosCreator 命令后）
+  BUILD_COCOS_EXTRA_ARGS: ""
+  # [用户可配] 构建产物路径
+  BUILD_COCOS_ARTIFACT_PATH: "build"

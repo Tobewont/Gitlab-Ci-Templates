@@ -1,0 +1,15 @@
+variables:
+  # [用户可配] LLM 参数。默认 LLM_MODEL / LLM_API_URL / LLM_API_KEY
+  COMPLIANCE_LLM_MODEL: "$LLM_MODEL"
+  COMPLIANCE_LLM_API_URL: "$LLM_API_URL"
+  COMPLIANCE_LLM_API_KEY: "$LLM_API_KEY"
+  # [用户可配] 报告回写用的 GitLab API token。默认 GITLAB_TOKEN
+  COMPLIANCE_GITLAB_TOKEN: "$GITLAB_TOKEN"
+  # [用户可配] 语言无关能力开关（Go 等语言变体可用各自开关覆盖）
+  COMPLIANCE_ENABLE_REGEX: "true"
+  COMPLIANCE_ENABLE_LLM: "false"
+  # [用户可配] 规范文档与自定义规则
+  COMPLIANCE_SPEC_FILE: ""
+  COMPLIANCE_CUSTOM_RULES_FILE: ""
+  # [用户可配] 业务侧脚本目录（可选，未提供时使用能力内置逻辑）
+  COMPLIANCE_SCRIPT_DIR: ".ci/compliance"

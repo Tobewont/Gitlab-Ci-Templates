@@ -1,0 +1,10 @@
+variables:
+  # ==== 质量阈门禁 .sonar-quality-gate（扫描后卡门禁） ====
+  # [用户可配] 门禁开关
+  QUALITY_SONAR_GATE_ENABLE: "true"
+  # [用户可配] 门禁用镜像（含 curl + jq）
+  QUALITY_SONAR_GATE_IMAGE: "$CI_BASE_IMAGE"
+  # [用户可配] 轮询后台任务的超时秒数
+  QUALITY_SONAR_GATE_TIMEOUT: "300"
+  # [用户可配] 轮询间隔秒数
+  QUALITY_SONAR_GATE_INTERVAL: "5"

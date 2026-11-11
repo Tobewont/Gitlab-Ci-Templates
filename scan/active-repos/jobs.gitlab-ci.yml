@@ -1,0 +1,579 @@
+# 原子能力：活跃工程/活跃分支批量扫描调度
+#   .active-repos-discover  只读 GitLab API 发现活跃工程与活跃分支，产出清单
+#                           范围：SCAN_ACTIVE_GROUPS（留空=全局扫描 token 可见工程 / 指定=仅这些 group）
+#                           工程：SCAN_ACTIVE_PROJECT_TOP_N（0=全部活跃工程 / N=最活跃 Top N）
+#                           分支：SCAN_ACTIVE_BRANCH_TOP_N（1=仅默认分支 / 0=全部活跃分支 / N=默认分支+最活跃(N-1)个）
+#   .active-repos-scan      消费清单，逐「工程+分支」组合 clone 后在工程根目录执行 npx 脚本
+#
+# 职责边界：
+#   - 本能力只负责「发现活跃工程/分支 → 拉代码 → 在工程目录执行命令 → 汇总」；
+#     扫描规则、结果处理与上传全部由 SCAN_ACTIVE_NPX_CMD 指向的 npx 包自身实现。
+#   - 每个「工程+分支」组合彼此隔离：任一组合 clone/npx 失败不影响其它组合，
+#     只在最后统一打印汇总日志做记录。同一工程的 Top N 个分支也互不影响。
+#   - 定时（一周一次）不在本能力内配置，由业务项目 .gitlab-ci.yml 的 workflow rules
+#     放行 $CI_PIPELINE_SOURCE == "schedule" + GitLab Pipeline schedules 完成。
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/scan/active-repos/variables.gitlab-ci.yml'
+
+stages:
+  - scan
+
+# ── 发现活跃工程与活跃分支（纯 API，只读，不需要源码）──────────────
+# 产出：
+#   $SCAN_ACTIVE_MANIFEST_FILE   清单 JSON，projects[] 每项为一个「工程+分支」组合：
+#                                {id,path_with_namespace,http_url,default_branch,branch,
+#                                 branch_rank,is_default_branch,commit_count,last_commit,
+#                                 branch_candidates}
+#                                同一工程取 Top N 时会出现 N 条（branch_rank 1..N）
+#   dotenv SCAN_ACTIVE_PROJECT_COUNT  活跃工程数（经工程 Top N 择优后）
+#   dotenv SCAN_ACTIVE_TARGET_COUNT   工程/分支组合数（下游实际执行次数）
+.active-repos-discover:
+  extends: .base-job
+  image: $SCAN_ACTIVE_DISCOVER_IMAGE
+  stage: scan
+  variables:
+    STEP_NAME: "Active Repos Discover"
+    STEP_ENABLE: "$SCAN_ACTIVE_ENABLE"
+    GIT_STRATEGY: none
+  script:
+    # 占位输出先于开关判断，保证 skip 时 artifacts/dotenv 也有文件，不产生上传告警
+    - |
+      printf '{"projects":[],"total":0,"project_count":0}\n' > "$SCAN_ACTIVE_MANIFEST_FILE"
+      printf 'SCAN_ACTIVE_PROJECT_COUNT=0\nSCAN_ACTIVE_TARGET_COUNT=0\n' > active-repos-discover.env
+    - !reference [.skip-if-disabled, script]
+    - |
+      set -eu
+      [ -n "$SCAN_ACTIVE_API_TOKEN" ] || { echo "[error] SCAN_ACTIVE_API_TOKEN 为空（默认取全局 GITLAB_TOKEN，需 read_api scope）"; exit 1; }
+      [ -n "$SCAN_ACTIVE_GROUPS" ] || echo "[info] SCAN_ACTIVE_GROUPS 留空 → 全局扫描（token 可见的所有工程）"
+      command -v python3 >/dev/null 2>&1 || { echo "[error] 镜像缺少 python3"; exit 1; }
+      case "$SCAN_ACTIVE_BRANCH_STRATEGY" in most-commits|default-branch) ;; *) echo "[error] SCAN_ACTIVE_BRANCH_STRATEGY 必须为 most-commits/default-branch"; exit 1 ;; esac
+      # 两个 TOP_N 允许 0（0=不限个数），故单独校验为非负整数
+      for name in SCAN_ACTIVE_PROJECT_TOP_N SCAN_ACTIVE_BRANCH_TOP_N; do
+        eval "v=\${$name}"
+        case "$v" in ''|*[!0-9]*) echo "[error] $name 必须是非负整数（0=不限）"; exit 1 ;; esac
+      done
+      for name in SCAN_ACTIVE_WINDOW_DAYS SCAN_ACTIVE_MAX_PROJECTS SCAN_ACTIVE_MAX_BRANCHES_PER_PROJECT SCAN_ACTIVE_API_WORKERS; do
+        eval "v=\${$name}"; case "$v" in ''|*[!0-9]*) echo "[error] $name 必须是正整数"; exit 1 ;; esac
+        [ "$v" -gt 0 ] || { echo "[error] $name 必须大于 0"; exit 1; }
+      done
+      GITLAB_API_V4_URL="$CI_API_V4_URL" python3 - <<'PYEOF'
+      # -*- coding: utf-8 -*-
+      """只读发现活跃工程与活跃分支：仅 GET GitLab REST API，绝不对业务工程做任何写操作。"""
+      import json, os, re, sys, urllib.error, urllib.parse, urllib.request
+      from concurrent.futures import ThreadPoolExecutor
+      from datetime import datetime, timedelta, timezone
+
+      API = os.environ["GITLAB_API_V4_URL"].rstrip("/")
+      TOKEN = os.environ["SCAN_ACTIVE_API_TOKEN"]
+      DAYS = int(os.environ["SCAN_ACTIVE_WINDOW_DAYS"])
+      GROUPS = [g.strip() for g in os.environ.get("SCAN_ACTIVE_GROUPS", "").split(",") if g.strip()]
+      SUBGROUPS = os.environ.get("SCAN_ACTIVE_INCLUDE_SUBGROUPS", "true").lower() == "true"
+      STRATEGY = os.environ["SCAN_ACTIVE_BRANCH_STRATEGY"]
+      MAX_PROJECTS = int(os.environ["SCAN_ACTIVE_MAX_PROJECTS"])
+      MAX_BRANCHES = int(os.environ["SCAN_ACTIVE_MAX_BRANCHES_PER_PROJECT"])
+      # 分支 Top N 语义：1=仅默认分支；0=所有活跃分支；N>1=默认分支 + 最活跃的 (N-1) 个
+      #   default-branch 策略等价于 BRANCH_TOP_N=1
+      BRANCH_TOP_N = 1 if STRATEGY == "default-branch" else int(os.environ["SCAN_ACTIVE_BRANCH_TOP_N"])
+      # 工程 Top N：0 = 窗口内所有活跃工程（None 表示不限）；正整数 = 按活跃度择优截断
+      _ptn = int(os.environ.get("SCAN_ACTIVE_PROJECT_TOP_N", "0") or 0)
+      PROJECT_TOP_N = None if _ptn == 0 else _ptn
+      WORKERS = int(os.environ["SCAN_ACTIVE_API_WORKERS"])
+      MANIFEST = os.environ["SCAN_ACTIVE_MANIFEST_FILE"]
+      # 单分支统计提交数时最多翻的页数（per_page=100）；仅用于活跃度排序，无需精确到万级
+      COMMIT_PAGE_CAP = 5
+
+      def rx(name):
+          pat = os.environ.get(name, "").strip()
+          return re.compile(pat) if pat else None
+
+      P_INC, P_EXC = rx("SCAN_ACTIVE_PROJECT_INCLUDE"), rx("SCAN_ACTIVE_PROJECT_EXCLUDE")
+      B_INC, B_EXC = rx("SCAN_ACTIVE_BRANCH_INCLUDE"), rx("SCAN_ACTIVE_BRANCH_EXCLUDE")
+
+      SINCE = datetime.now(timezone.utc) - timedelta(days=DAYS)
+      SINCE_ISO = SINCE.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+      def get(path, params=None):
+          """只读 GET；返回 (json, headers)。非 GET 在本脚本中不存在，杜绝写业务仓。"""
+          url = f"{API}/{path.lstrip('/')}"
+          if params:
+              url += "?" + urllib.parse.urlencode(params)
+          req = urllib.request.Request(url, headers={"PRIVATE-TOKEN": TOKEN}, method="GET")
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              return json.loads(resp.read().decode("utf-8")), {k.lower(): v for k, v in resp.headers.items()}
+
+      def paged(path, params=None, page_cap=0):
+          params = dict(params or {})
+          params.setdefault("per_page", 100)
+          page = 1
+          while True:
+              params["page"] = page
+              try:
+                  data, headers = get(path, params)
+              except urllib.error.HTTPError as e:
+                  raise RuntimeError(f"GET {path} HTTP {e.code}") from None
+              if not isinstance(data, list) or not data:
+                  return
+              yield from data
+              if page_cap and page >= page_cap:
+                  return
+              nxt = headers.get("x-next-page")
+              if not nxt:
+                  return
+              page = int(nxt)
+
+      def parse_ts(value):
+          if not value:
+              return None
+          try:
+              return datetime.fromisoformat(value.replace("Z", "+00:00"))
+          except ValueError:
+              return None
+
+      # ── 1) 列活跃工程（服务端 last_activity_after 过滤 + 活动时间倒序）──
+      #   GROUPS 留空 → 全局 GET /projects；否则逐 group GET /groups/:id/projects
+      COMMON_Q = {
+          "archived": "false",
+          "order_by": "last_activity_at",
+          "sort": "desc",
+          "simple": "true",
+          "last_activity_after": SINCE_ISO,
+      }
+      if GROUPS:
+          sources = []
+          for g in GROUPS:
+              enc = urllib.parse.quote(str(g), safe="")
+              q = dict(COMMON_Q)
+              q["include_subgroups"] = "true" if SUBGROUPS else "false"
+              sources.append((f"groups/{enc}/projects", q, f"group {g}"))
+      else:
+          q = dict(COMMON_Q)
+          if os.environ.get("SCAN_ACTIVE_MEMBERSHIP_ONLY", "false").lower() == "true":
+              q["membership"] = "true"
+          sources = [("projects", q, "全局（token 可见）")]
+
+      seen, projects = set(), []
+      for path_tpl, query, label in sources:
+          got = 0
+          for p in paged(path_tpl, query):
+              ts = parse_ts(p.get("last_activity_at"))
+              if ts and ts < SINCE:
+                  break          # 已按活动时间倒序，遇到窗口外即可停止翻页
+              pid = p.get("id")
+              ppath = p.get("path_with_namespace", "")
+              if pid in seen:
+                  continue
+              if P_EXC and P_EXC.search(ppath):
+                  continue
+              if P_INC and not P_INC.search(ppath):
+                  continue
+              seen.add(pid)
+              got += 1
+              projects.append({
+                  "id": pid,
+                  "path_with_namespace": ppath,
+                  "http_url": p.get("http_url_to_repo", ""),
+                  "default_branch": p.get("default_branch") or "",
+                  "last_activity_at": p.get("last_activity_at", ""),
+              })
+          print(f"[info] 范围 {label}：命中 {got} 个候选工程")
+
+      projects.sort(key=lambda x: x["last_activity_at"], reverse=True)
+      if len(projects) > MAX_PROJECTS:
+          print(f"[warn] 候选工程 {len(projects)} 个，超过 SCAN_ACTIVE_MAX_PROJECTS={MAX_PROJECTS}，按最后活动时间倒序截断")
+          projects = projects[:MAX_PROJECTS]
+      print(f"[info] 活跃窗口 since={SINCE_ISO}（{DAYS} 天），候选工程 {len(projects)} 个")
+
+      # ── 2) 逐工程挑活跃分支 ──
+      def count_commits(pid, branch):
+          """统计分支在窗口内的提交数（该分支可达提交，含从主干继承的提交）。"""
+          total = 0
+          for _ in paged(f"projects/{pid}/repository/commits",
+                         {"ref_name": branch, "since": SINCE_ISO}, page_cap=COMMIT_PAGE_CAP):
+              total += 1
+          return total
+
+      def pick(project):
+          pid, path = project["id"], project["path_with_namespace"]
+          default_branch = project["default_branch"]
+          try:
+              branches = list(paged(f"projects/{pid}/repository/branches"))
+          except RuntimeError as e:
+              return {"skip": f"{path}: 分支列表获取失败（{e}）"}
+          cands = []
+          for b in branches:
+              name = b.get("name", "")
+              # BRANCH_TOP_N=1（含 default-branch 策略）只需要默认分支，其余分支无需统计
+              if BRANCH_TOP_N == 1 and name != default_branch:
+                  continue
+              if B_EXC and B_EXC.search(name):
+                  continue
+              if B_INC and not B_INC.search(name):
+                  continue
+              committed = parse_ts((b.get("commit") or {}).get("committed_date"))
+              if not committed or committed < SINCE:
+                  continue   # 窗口外的分支直接淘汰，省掉后续提交统计请求
+              cands.append((name, committed))
+          if not cands:
+              return {"skip": f"{path}: 窗口内无满足条件的活跃分支"}
+          cands.sort(key=lambda x: x[1], reverse=True)
+          if len(cands) > MAX_BRANCHES:
+              cands = cands[:MAX_BRANCHES]
+          scored = []
+          for name, committed in cands:
+              try:
+                  cnt = count_commits(pid, name)
+              except RuntimeError:
+                  cnt = 0
+              if cnt <= 0:
+                  continue
+              scored.append((cnt, committed, name))
+          if not scored:
+              return {"skip": f"{path}: 窗口内无提交"}
+
+          # ── 分支选取：默认分支优先保底，其余按提交数倒序补齐 ──
+          #   1   = 只要默认分支
+          #   0   = 全部活跃分支
+          #   N>1 = 默认分支 + 其余最活跃的 (N-1) 个
+          dflt = [s for s in scored if s[2] == default_branch]
+          others = sorted((s for s in scored if s[2] != default_branch),
+                          key=lambda x: (x[0], x[1]), reverse=True)
+          if BRANCH_TOP_N == 1:
+              chosen = dflt
+              if not chosen:
+                  return {"skip": f"{path}: 默认分支 {default_branch or '(未设置)'} 窗口内无提交"}
+          elif BRANCH_TOP_N == 0:
+              chosen = dflt + others          # 不限个数
+          else:
+              # 默认分支入选则占 1 个名额，其余补 (N-1) 个；默认分支无提交时不占名额
+              chosen = dflt + others[:BRANCH_TOP_N - 1]
+
+          if not chosen:
+              return {"skip": f"{path}: 窗口内无满足条件的分支可选"}
+
+          items = []
+          for rank, (cnt, committed, name) in enumerate(chosen, 1):
+              items.append({
+                  "id": pid,
+                  "path_with_namespace": path,
+                  "http_url": project["http_url"],
+                  "default_branch": default_branch,
+                  "branch": name,
+                  "branch_rank": rank,             # 1=默认分支（若入选），其后按提交数排序
+                  "is_default_branch": name == default_branch,
+                  "commit_count": cnt,
+                  "last_commit": committed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "branch_candidates": len(cands),
+              })
+          # 工程活跃度 = 该工程窗口内提交数最多的分支的提交数（用于工程级 Top N 择优）
+          return {
+              "items": items,
+              "path": path,
+              "activity": max(s[0] for s in scored),
+              "last_activity_at": project.get("last_activity_at", ""),
+          }
+
+      results, skipped = [], []
+      with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+          for r in pool.map(pick, projects):
+              if "items" in r:
+                  results.append(r)
+              else:
+                  skipped.append(r["skip"])
+
+      # ── 3) 工程级 Top N 择优：按活跃度（最活跃分支的提交数）倒序，并列时最后活动时间更新者优先 ──
+      results.sort(key=lambda r: (-r["activity"], r["last_activity_at"] or "", r["path"]))
+      if PROJECT_TOP_N is not None and len(results) > PROJECT_TOP_N:
+          dropped = results[PROJECT_TOP_N:]
+          print(f"[info] 活跃工程 {len(results)} 个，按 SCAN_ACTIVE_PROJECT_TOP_N={PROJECT_TOP_N} 取最活跃的前 {PROJECT_TOP_N} 个")
+          for r in dropped:
+              print(f"[skip] {r['path']}: 未进入最活跃 Top {PROJECT_TOP_N}（活跃度 {r['activity']} commits）")
+          results = results[:PROJECT_TOP_N]
+
+      # 同工程的多个分支相邻排列，工程间按活跃度倒序（沿用上面的择优顺序）
+      picked = []
+      for r in results:
+          picked.extend(sorted(r["items"], key=lambda x: x["branch_rank"]))
+      project_count = len(results)
+
+      for s in skipped:
+          print(f"[skip] {s}")
+      print("")
+      _pn = "all" if PROJECT_TOP_N is None else str(PROJECT_TOP_N)
+      _bn = {0: "all", 1: "默认分支"}.get(BRANCH_TOP_N, f"默认分支+{BRANCH_TOP_N - 1}")
+      print(f"==================== 活跃工程/分支（窗口 {DAYS} 天，工程 {_pn}，分支 {_bn}）====================")
+      for i in picked:
+          flag = "*" if i.get("is_default_branch") else " "
+          print(f"  #{i['branch_rank']}{flag} {i['path_with_namespace']:<52} {i['branch']:<28} "
+                f"{i['commit_count']} commits  (候选分支 {i['branch_candidates']})")
+      print("  （* = 默认分支）")
+      print(f"---- 活跃工程 {project_count} 个，待扫描工程/分支组合 {len(picked)} 个，跳过 {len(skipped)} 个 ----")
+
+      with open(MANIFEST, "w", encoding="utf-8") as f:
+          json.dump({
+              "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "since": SINCE_ISO,
+              "window_days": DAYS,
+              "branch_strategy": STRATEGY,
+              "project_top_n": PROJECT_TOP_N or 0,
+              "branch_top_n": BRANCH_TOP_N,
+              "project_count": project_count,
+              "total": len(picked),          # 工程/分支组合数（下游按此逐个 clone 执行）
+              "skipped": len(skipped),
+              "projects": picked,
+          }, f, ensure_ascii=False, indent=2)
+      with open("active-repos-discover.env", "w", encoding="utf-8") as f:
+          f.write(f"SCAN_ACTIVE_PROJECT_COUNT={project_count}\n")
+          f.write(f"SCAN_ACTIVE_TARGET_COUNT={len(picked)}\n")
+      if not picked:
+          print("[warn] 窗口内没有活跃工程，下游扫描将无事可做")
+      PYEOF
+  artifacts:
+    when: always
+    expire_in: "7 days"
+    paths:
+      - $SCAN_ACTIVE_MANIFEST_FILE
+    reports:
+      dotenv: active-repos-discover.env
+
+# ── 逐「工程+分支」组合 clone + 执行 npx（组合间失败隔离，末尾统一汇总）────────────
+# 消费 .active-repos-discover 产出的清单；需 needs 上游 job 以拿到 artifacts。
+# 传给 npx 脚本的上下文环境变量：
+#   SCAN_PROJECT_ID / SCAN_PROJECT_PATH / SCAN_PROJECT_URL / SCAN_BRANCH
+#   SCAN_BRANCH_RANK（该工程内按提交数排名，1=最活跃）/ SCAN_BRANCH_COMMIT_COUNT
+#   SCAN_COMMIT_SHA / SCAN_WINDOW_DAYS / SCAN_WINDOW_SINCE
+.active-repos-scan:
+  extends: .base-job
+  image: $SCAN_ACTIVE_SCAN_IMAGE
+  stage: scan
+  variables:
+    STEP_NAME: "Active Repos Scan"
+    STEP_ENABLE: "$SCAN_ACTIVE_ENABLE"
+    GIT_STRATEGY: none
+  script:
+    # 占位输出先于开关判断，保证 skip 时 artifacts 也有文件，不产生上传告警
+    - |
+      printf '{"total":0,"success":0,"failed":0,"results":[]}\n' > "$SCAN_ACTIVE_RESULT_FILE"
+      mkdir -p "$SCAN_ACTIVE_LOG_DIR"
+    - !reference [.skip-if-disabled, script]
+    - |
+      set -u
+      [ -n "$SCAN_ACTIVE_NPX_CMD" ] || { echo "[error] SCAN_ACTIVE_NPX_CMD 未配置（要在每个工程根目录执行的命令）"; exit 1; }
+      [ -f "$SCAN_ACTIVE_MANIFEST_FILE" ] || { echo "[error] 清单不存在: $SCAN_ACTIVE_MANIFEST_FILE（需 needs 上游 .active-repos-discover job）"; exit 1; }
+      [ -n "$SCAN_ACTIVE_CLONE_TOKEN" ] || { echo "[error] SCAN_ACTIVE_CLONE_TOKEN 为空（默认取全局 GITLAB_TOKEN，需 read_repository scope）"; exit 1; }
+      for cmd in node npm npx git; do command -v "$cmd" >/dev/null 2>&1 || { echo "[error] 镜像缺少命令: $cmd"; exit 1; }; done
+      for name in SCAN_ACTIVE_TIMEOUT_SECONDS SCAN_ACTIVE_CONCURRENCY SCAN_ACTIVE_FAIL_LOG_TAIL SCAN_ACTIVE_CLONE_DEPTH; do
+        eval "v=\${$name}"; case "$v" in ''|*[!0-9]*) echo "[error] $name 必须是非负整数"; exit 1 ;; esac
+      done
+      [ "$SCAN_ACTIVE_TIMEOUT_SECONDS" -gt 0 ] || { echo "[error] SCAN_ACTIVE_TIMEOUT_SECONDS 必须大于 0"; exit 1; }
+      [ "$SCAN_ACTIVE_CONCURRENCY" -gt 0 ] || { echo "[error] SCAN_ACTIVE_CONCURRENCY 必须大于 0"; exit 1; }
+      case "$SCAN_ACTIVE_WORKDIR" in ''|/*|*..*) echo "[error] SCAN_ACTIVE_WORKDIR 必须是不含 .. 的相对路径"; exit 1 ;; esac
+
+      ROOT="$CI_PROJECT_DIR"
+      WORK="$ROOT/$SCAN_ACTIVE_WORKDIR"
+      LOGS="$ROOT/$SCAN_ACTIVE_LOG_DIR"
+      RES="$ROOT/.scan-results"
+      rm -rf "$WORK" "$LOGS" "$RES"; mkdir -p "$WORK" "$LOGS" "$RES"
+
+      # ── 清单解析（node 解析 JSON → TSV 计划表，避免依赖 jq）──
+      PLAN="$RES/plan.tsv"
+      MANIFEST_ABS="$ROOT/$SCAN_ACTIVE_MANIFEST_FILE" PLAN_OUT="$PLAN" SINCE_OUT="$RES/since" node -e '
+        const fs = require("fs");
+        const m = JSON.parse(fs.readFileSync(process.env.MANIFEST_ABS, "utf8"));
+        const out = [];
+        for (const p of (m.projects || [])) {
+          if (!p.http_url || !p.branch) continue;
+          out.push([p.id, p.path_with_namespace, p.branch, p.commit_count, p.http_url,
+                    p.branch_rank || 1].join("\t"));
+        }
+        fs.writeFileSync(process.env.PLAN_OUT, out.join("\n") + (out.length ? "\n" : ""));
+        fs.writeFileSync(process.env.SINCE_OUT, m.since || "");
+        const pc = m.project_count != null ? m.project_count
+          : new Set((m.projects || []).map(p => p.path_with_namespace)).size;
+        const bn = m.branch_top_n === 0 ? "全部活跃分支"
+          : m.branch_top_n === 1 ? "仅默认分支"
+          : `默认分支+${m.branch_top_n - 1}`;
+        const pn = !m.project_top_n ? "全部活跃工程" : `最活跃 ${m.project_top_n} 个`;
+        console.log(`[info] 清单窗口 ${m.window_days} 天 since=${m.since}，`
+          + `活跃工程 ${pc} 个，待扫描工程/分支组合 ${out.length} 个`
+          + `（工程：${pn}，分支：${bn}）`);
+      ' || { echo "[error] 清单解析失败"; exit 1; }
+      [ -f "$PLAN" ] || { echo "[error] 清单解析未产出计划表"; exit 1; }
+      SCAN_WINDOW_SINCE=$(cat "$RES/since" 2>/dev/null || echo "")
+      TOTAL=$(awk 'END{print NR+0}' "$PLAN")
+      if [ "$TOTAL" -eq 0 ]; then
+        echo "[skip] 清单内没有活跃工程，无需扫描"
+        printf '{"window_days":%s,"total":0,"success":0,"failed":0,"results":[]}\n' "$SCAN_ACTIVE_WINDOW_DAYS" > "$SCAN_ACTIVE_RESULT_FILE"
+        rm -rf "$WORK" "$RES"
+        exit 0
+      fi
+
+      # ── npm 源与共享缓存（配合预热，避免每个工程重复下载 npx 包）──
+      NPM_CACHE="$ROOT/$SCAN_ACTIVE_NPM_CACHE_DIR"
+      mkdir -p "$NPM_CACHE"
+      export npm_config_cache="$NPM_CACHE"
+      if [ -n "$SCAN_ACTIVE_NPM_REGISTRY" ]; then
+        npm config set registry "$SCAN_ACTIVE_NPM_REGISTRY" >/dev/null 2>&1 || true
+        export npm_config_registry="$SCAN_ACTIVE_NPM_REGISTRY"
+      fi
+      if [ -n "$SCAN_ACTIVE_NPX_PREWARM_CMD" ]; then
+        echo "==> 预热 npx 包缓存: $SCAN_ACTIVE_NPX_PREWARM_CMD"
+        if sh -c "$SCAN_ACTIVE_NPX_PREWARM_CMD" > "$LOGS/_prewarm.log" 2>&1; then
+          echo "预热完成（后续工程复用 $SCAN_ACTIVE_NPM_CACHE_DIR）"
+        else
+          echo "[warn] 预热失败（不影响各工程执行，详见 $SCAN_ACTIVE_LOG_DIR/_prewarm.log）"
+          tail -n 20 "$LOGS/_prewarm.log" 2>/dev/null || true
+        fi
+      fi
+
+      # ── git 认证：askpass 供给凭据，token 不进 URL、不进日志 ──
+      ASKPASS="$RES/askpass.sh"
+      printf '#!/bin/sh\ncase "$1" in *[Uu]sername*) printf "%%s\\n" "$SCAN_ACTIVE_CLONE_USERNAME";; *[Pp]assword*) printf "%%s\\n" "$SCAN_ACTIVE_CLONE_TOKEN";; *) exit 1;; esac\n' > "$ASKPASS"
+      chmod 700 "$ASKPASS"
+      export SCAN_ACTIVE_CLONE_USERNAME SCAN_ACTIVE_CLONE_TOKEN
+
+      DEPTH_ARG=""
+      [ "$SCAN_ACTIVE_CLONE_DEPTH" -gt 0 ] && DEPTH_ARG="--depth $SCAN_ACTIVE_CLONE_DEPTH"
+      SUBMODULE_ARG=""
+      [ "$SCAN_ACTIVE_CLONE_RECURSE_SUBMODULES" = "true" ] && SUBMODULE_ARG="--recurse-submodules"
+
+      # ── 单工程执行体（独立进程，配合 timeout 做硬超时）──
+      HELPER="$RES/scan-one.sh"
+      cat > "$HELPER" <<'HELPEREOF'
+      #!/bin/sh
+      set -e
+      rm -rf "$P_DIR"
+      mkdir -p "$P_DIR"
+      echo "==> git clone [$P_BRANCH] $P_PATH"
+      if [ -n "$SCAN_ACTIVE_CLONE_SHALLOW_SINCE" ]; then
+        GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 git -c advice.detachedHead=false \
+          clone --shallow-since "$SCAN_ACTIVE_CLONE_SHALLOW_SINCE" $SUBMODULE_ARG --branch "$P_BRANCH" --single-branch "$P_URL" "$P_DIR"
+      else
+        GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 git -c advice.detachedHead=false \
+          clone $DEPTH_ARG $SUBMODULE_ARG --branch "$P_BRANCH" --single-branch "$P_URL" "$P_DIR"
+      fi
+      cd "$P_DIR"
+      git config --global --add safe.directory "$P_DIR" 2>/dev/null || true
+      SCAN_COMMIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo "")
+      export SCAN_PROJECT_ID="$P_ID" SCAN_PROJECT_PATH="$P_PATH" SCAN_PROJECT_URL="$P_URL"
+      export SCAN_BRANCH="$P_BRANCH" SCAN_BRANCH_COMMIT_COUNT="$P_COUNT" SCAN_COMMIT_SHA
+      export SCAN_BRANCH_RANK="${P_RANK:-1}"
+      export SCAN_WINDOW_DAYS SCAN_WINDOW_SINCE
+      echo "==> 执行扫描: $SCAN_ACTIVE_NPX_CMD  (cwd=$P_DIR, commit=$SCAN_COMMIT_SHA)"
+      sh -c "$SCAN_ACTIVE_NPX_CMD"
+      HELPEREOF
+      chmod 700 "$HELPER"
+
+      TIMEOUT_BIN=""
+      command -v timeout >/dev/null 2>&1 && TIMEOUT_BIN="timeout"
+      [ -n "$TIMEOUT_BIN" ] || echo "[warn] 镜像缺少 timeout，单工程超时保护不可用"
+
+      SCAN_WINDOW_DAYS="$SCAN_ACTIVE_WINDOW_DAYS"
+      export ASKPASS DEPTH_ARG SUBMODULE_ARG SCAN_ACTIVE_NPX_CMD SCAN_WINDOW_DAYS SCAN_WINDOW_SINCE
+
+      _run_one() {
+        START=$(date +%s)
+        # 用 `|| RC=$?` 兜住非零退出码：命令失败不能让本子进程提前结束，
+        # 否则结果 TSV 写不出来，失败组合将从汇总中丢失。
+        RC=0
+        if [ -n "$TIMEOUT_BIN" ]; then
+          "$TIMEOUT_BIN" "$SCAN_ACTIVE_TIMEOUT_SECONDS" sh "$HELPER" > "$P_LOG" 2>&1 || RC=$?
+        else
+          sh "$HELPER" > "$P_LOG" 2>&1 || RC=$?
+        fi
+        DUR=$(( $(date +%s) - START ))
+        STATUS="ok"; [ "$RC" -ne 0 ] && STATUS="fail"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$STATUS" "$RC" "$DUR" "$P_PATH" "$P_BRANCH" "$P_COUNT" "${P_LOG#$ROOT/}" > "$P_RES"
+        if [ "$SCAN_ACTIVE_CONCURRENCY" -eq 1 ]; then
+          cat "$P_LOG"
+          echo "---- [$STATUS] $P_PATH ($P_BRANCH) exit=$RC ${DUR}s ----"
+          echo ""
+        else
+          echo "---- [$STATUS] $P_PATH ($P_BRANCH) exit=$RC ${DUR}s ----"
+        fi
+        [ "$SCAN_ACTIVE_KEEP_WORKDIR" = "true" ] || rm -rf "$P_DIR"
+      }
+
+      echo ""
+      echo "==================== 开始扫描 $TOTAL 个工程/分支组合（并发 $SCAN_ACTIVE_CONCURRENCY）===================="
+      IDX=0; RUNNING=0
+      TAB=$(printf '\t')
+      while IFS="$TAB" read -r P_ID P_PATH P_BRANCH P_COUNT P_URL P_RANK; do
+        [ -n "${P_ID:-}" ] || continue
+        IDX=$((IDX+1))
+        # slug 必须含分支：同一工程取多个分支时会并存，否则目录/日志互相覆盖。
+        # 路径分隔符 / 正常转为 _；但分支名里的非 ASCII（如中文）全被替换成 _ 后
+        # 可能让同工程两个不同分支撞名，故仅在分支部分被污染时追加短哈希保唯一。
+        PSLUG=$(printf '%s' "$P_PATH" | tr -c 'A-Za-z0-9._-' '_')
+        BSLUG=$(printf '%s' "$P_BRANCH" | tr -c 'A-Za-z0-9._-' '_')
+        if [ "$BSLUG" != "$P_BRANCH" ]; then
+          BSLUG="$BSLUG-$(printf '%s' "$P_BRANCH" | cksum | cut -d' ' -f1)"
+        fi
+        SLUG="$PSLUG@$BSLUG"
+        P_DIR="$WORK/$SLUG"
+        P_LOG="$LOGS/$SLUG.log"
+        P_RES="$RES/$(printf '%04d' "$IDX").tsv"
+        export P_ID P_PATH P_BRANCH P_COUNT P_URL P_DIR P_LOG P_RANK
+        echo "[$IDX/$TOTAL] $P_PATH ($P_BRANCH #${P_RANK:-1}, $P_COUNT commits)"
+        _run_one &
+        RUNNING=$((RUNNING+1))
+        if [ "$RUNNING" -ge "$SCAN_ACTIVE_CONCURRENCY" ]; then wait; RUNNING=0; fi
+      done < "$PLAN"
+      wait
+
+      # ── 汇总日志（唯一的成败记录出口）──
+      SUMMARY="$RES/summary.tsv"
+      cat "$RES"/[0-9]*.tsv > "$SUMMARY" 2>/dev/null || : > "$SUMMARY"
+      OK=$(awk -F'\t' '$1=="ok"{n++}END{print n+0}' "$SUMMARY")
+      FAIL=$(awk -F'\t' '$1=="fail"{n++}END{print n+0}' "$SUMMARY")
+      PROJ_N=$(awk -F'\t' '{print $4}' "$SUMMARY" | sort -u | wc -l | tr -d ' ')
+      echo ""
+      echo "============ 扫描汇总（窗口 $SCAN_ACTIVE_WINDOW_DAYS 天，$PROJ_N 个工程 / $TOTAL 个分支）============"
+      awk -F'\t' '{
+        note = ($2 == 124 ? "  (timeout)" : "")
+        printf "[%-4s] %-52s %-28s %4s commits  %5ss  exit=%s%s\n", $1, $4, $5, $6, $3, $2, note
+      }' "$SUMMARY"
+      echo "-------------------------------------------------------------------"
+      echo "成功 $OK / 失败 $FAIL / 总计 $TOTAL（工程 $PROJ_N 个）"
+      if [ "$FAIL" -gt 0 ] && [ "$SCAN_ACTIVE_FAIL_LOG_TAIL" -gt 0 ]; then
+        echo ""
+        echo "---- 失败项日志尾部（各 $SCAN_ACTIVE_FAIL_LOG_TAIL 行，完整日志见 artifacts $SCAN_ACTIVE_LOG_DIR/）----"
+        awk -F'\t' '$1=="fail"{print $4" ("$5")\t"$7}' "$SUMMARY" | while IFS="$TAB" read -r fp fl; do
+          echo ""
+          echo "===== [fail] $fp ====="
+          tail -n "$SCAN_ACTIVE_FAIL_LOG_TAIL" "$ROOT/$fl" 2>/dev/null || echo "(无日志)"
+        done
+      fi
+
+      SUMMARY_TSV="$SUMMARY" TOTAL_N="$TOTAL" OK_N="$OK" FAIL_N="$FAIL" PROJ_N="$PROJ_N" \
+      WIN_DAYS="$SCAN_ACTIVE_WINDOW_DAYS" WIN_SINCE="$SCAN_WINDOW_SINCE" \
+      RESULT_OUT="$ROOT/$SCAN_ACTIVE_RESULT_FILE" node -e '
+        const fs = require("fs");
+        const lines = fs.readFileSync(process.env.SUMMARY_TSV, "utf8").split("\n").filter(Boolean);
+        const results = lines.map(l => {
+          const [status, exit_code, duration, path, branch, commit_count, log] = l.split("\t");
+          return { path_with_namespace: path, branch, commit_count: Number(commit_count),
+                   status, exit_code: Number(exit_code), duration_seconds: Number(duration), log };
+        });
+        fs.writeFileSync(process.env.RESULT_OUT, JSON.stringify({
+          window_days: Number(process.env.WIN_DAYS), since: process.env.WIN_SINCE,
+          project_count: Number(process.env.PROJ_N),
+          total: Number(process.env.TOTAL_N), success: Number(process.env.OK_N),
+          failed: Number(process.env.FAIL_N), results,
+        }, null, 2) + "\n");
+      ' || echo "[warn] 结果 JSON 生成失败（汇总日志已打印，不影响判定）"
+
+      rm -rf "$WORK" "$RES"
+      if [ "$FAIL" -gt 0 ] && [ "$SCAN_ACTIVE_FAIL_ON_ERROR" = "true" ]; then
+        echo "[error] 有 $FAIL 个工程/分支扫描失败（SCAN_ACTIVE_FAIL_ON_ERROR=true）"; exit 1
+      fi
+      echo "工程/分支之间互不影响，失败仅记录不阻断（SCAN_ACTIVE_FAIL_ON_ERROR=$SCAN_ACTIVE_FAIL_ON_ERROR）"
+  artifacts:
+    when: always
+    expire_in: "7 days"
+    paths:
+      - $SCAN_ACTIVE_RESULT_FILE
+      - $SCAN_ACTIVE_LOG_DIR

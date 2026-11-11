@@ -1,0 +1,285 @@
+# 文案公共字段（全部场景共用）
+#   .notify-msg-fields 复位 _MSG_CUSTOM（自定义正文开关，置 1 时 .notify-msg-default
+#   跳过通用骨架），并产出各场景文案共用的基础变量：
+#     COMMIT_TITLE       commit 首行标题
+#     TRIGGER_USER       触发人/收件人登录名（bot 触发时回退 commit author 邮箱前缀）
+#     _AUTHOR_LOGIN      commit author 邮箱前缀
+#     DURATION           耗时（3m25s 格式），无数据则空
+#     _DUR_TXT           耗时后缀（"，耗时 3m25s"），无数据则空
+#     _STATUS_JOB_NAME   状态归属 job 名
+#     _COMMITTER         提交人（pipeline 发起人，缺省回退 commit author）
+#     _PERSON_LINE       【作者】/【触发人】行（两者同人时只一行）
+#   依赖入参：.notify-resolve-api / .notify-resolve-inline 产出的 STATUS / _RAW_DURATION
+.notify-msg-fields:
+  script:
+    - |
+      # 复位自定义正文开关：同一 shell 内多次组装时，各次组装互不影响。
+      _MSG_CUSTOM=0; export _MSG_CUSTOM
+      COMMIT_TITLE="${CI_COMMIT_TITLE:-$(printf '%s' "$CI_COMMIT_MESSAGE" | head -1)}"
+      # 触发人/收件人：优先 GITLAB_USER_LOGIN；若为 bot（Group/Project token、定时触发），
+      #   回退用 commit author 邮箱前缀（登录域账号），保证 person 模式能通知到真实提交人。
+      #   bot 账号形如 project_<id>_bot / project_<id>_bot1 / group_<id>_bot2，数字后缀需一并识别。
+      _GUL="${GITLAB_USER_LOGIN:-}"
+      case "$_GUL" in
+        ""|*_bot|*_bot[0-9]|*_bot[0-9][0-9]|*_bot[0-9][0-9][0-9]|gitlab_ci|gitlab-ci) _GUL="";;
+      esac
+      _AUTHOR_LOGIN=$(printf '%s' "${CI_COMMIT_AUTHOR:-}" | sed -n 's/.*<\([^@>]*\)@.*/\1/p')
+      TRIGGER_USER=$(printf '%s' "${_GUL:-${_AUTHOR_LOGIN:-$CI_COMMIT_AUTHOR}}" | sed 's/ *<.*//' | tr -d ' \r\n')
+
+      # 耗时格式化 (秒 → 3m25s)；无数据则为空
+      DURATION=""
+      if [ -n "$_RAW_DURATION" ]; then
+        DURATION=$(python3 -c "d=int(float('$_RAW_DURATION')); print('%dm%ds' % (d//60, d%60))" 2>/dev/null || echo "")
+      fi
+      _DUR_TXT=""
+      [ -n "$DURATION" ] && _DUR_TXT="，耗时 $DURATION"
+
+      # 状态归属 job 名：独立 notify job 的 CI_JOB_NAME 是 notify 自身，不代表业务结果；
+      #   改用 .notify-resolve-api 写入的名称（失败=失败 job 列表，成功=全部）；
+      #   内嵌场景无此文件，回退 CI_JOB_NAME（业务 job 自身）
+      _STATUS_JOB_NAME="$CI_JOB_NAME"
+      _DETAIL_JOB_NAME=""
+      if [ -s .notify-status-job ]; then
+        _STATUS_JOB_NAME=$(head -1 .notify-status-job)
+        _DETAIL_JOB_NAME="$_STATUS_JOB_NAME"
+      fi
+      rm -f .notify-status-job 2>/dev/null || true
+
+      # 提交人：取 pipeline 实际发起人（GITLAB_USER_NAME），缺省回退 commit author
+      _COMMITTER=$(printf '%s' "${GITLAB_USER_NAME:-}" | tr -d '\r\n')
+      if [ -z "$_COMMITTER" ]; then
+        _COMMITTER=$(printf '%s' "${CI_COMMIT_AUTHOR:-}" | sed 's/ *<.*//' | tr -d ' \r\n')
+      fi
+      [ -n "$_COMMITTER" ] || _COMMITTER="unknown"
+
+      # 作者与触发人同为一人时只保留【作者】行；不同人（他人重跑/MR 审批触发等）才两行展示
+      _AUTHOR_NAME=$(printf '%s' "${CI_COMMIT_AUTHOR:-}" | sed 's/ *<.*//' | tr -d ' \r\n')
+      if [ "$TRIGGER_USER" = "$_AUTHOR_NAME" ] || { [ -n "$_AUTHOR_LOGIN" ] && [ "$TRIGGER_USER" = "$_AUTHOR_LOGIN" ]; }; then
+        _PERSON_LINE="【作者】\${CI_COMMIT_AUTHOR}"
+      else
+        _PERSON_LINE="【作者】\${CI_COMMIT_AUTHOR}\n【触发人】\${TRIGGER_USER}"
+      fi
+      export COMMIT_TITLE TRIGGER_USER _AUTHOR_LOGIN DURATION _DUR_TXT _STATUS_JOB_NAME _DETAIL_JOB_NAME _COMMITTER _PERSON_LINE
+
+# 通用正文骨架（pipeline / build / upload / download / deploy / scan / review / smoke 共用）
+#   各场景只提供 _SCN（场景名）与 _EXTRA（附加行），其余字段全场景统一
+#   产出：_DEF_TITLE / _DEF_MSG
+.notify-msg-default:
+  script:
+    - |
+      # 自定义正文场景（如 compliance）已置 _MSG_CUSTOM=1 并自备 _DEF_TITLE/_DEF_MSG，此处跳过
+      if [ "${_MSG_CUSTOM:-0}" != "1" ]; then
+        _DEF_TITLE="\${EMOJI} \${CI_PROJECT_NAME} \${_SCN}\${STATE}"
+        _DEF_MSG="【项目】\${CI_PROJECT_NAME}\n【分支】\${CI_COMMIT_REF_NAME}\n【Commit】\${CI_COMMIT_SHORT_SHA} \${COMMIT_TITLE}\n${_PERSON_LINE}${_EXTRA}\n【状态】\${_STATUS_JOB_NAME}阶段 \${STATE}\${_DUR_TXT}\n【流水线】\${CI_PIPELINE_URL}"
+      fi
+      export _DEF_TITLE _DEF_MSG
+
+# 已发布制品：读取各 job 在发布成功后写下的 ci-notify-artifacts.tsv。
+#   来源：镜像推送，以及 Package、Git、FTP、OSS 上传。
+#   通知状态不是 success 时不写卡片、也不写详情。阶段时间线和失败日志照常保留。
+#   文件缺失、下载失败、解析失败时正文不变，通知 job 不因此失败。
+#   产出：.notify-artifact-head / .notify-artifact-more / .notify-artifacts.json
+.notify-msg-artifacts:
+  script:
+    - |
+      rm -f .notify-artifact-head .notify-artifact-more .notify-artifacts.json
+      _py="${TMPDIR:-/tmp}/ci_notify_arts_$$.py"
+      cat > "$_py" <<'PY'
+      import os, sys, json, io, zipfile, urllib.request
+      if os.environ.get("STATUS") != "success":
+          print("[notify] 流水线未成功，不带制品")
+          raise SystemExit(0)
+      def add_text(text, rows):
+          for line in (text or "").splitlines():
+              parts = line.split("\t")
+              if len(parts) < 2:
+                  continue
+              kind = parts[0].strip()
+              display = parts[1].strip().replace("\r", "").replace("\n", "")
+              url = parts[2].strip().replace("\r", "").replace("\n", "") if len(parts) > 2 else ""
+              if kind not in ("image", "package", "git", "ftp", "oss", "gxt") or not display:
+                  continue
+              def _no_userinfo(value):
+                  if "://" not in value or "@" not in value.split("://", 1)[1]:
+                      return value
+                  scheme, rest = value.split("://", 1)
+                  return scheme + "://" + rest.split("@", 1)[1]
+              display = _no_userinfo(display)
+              url = _no_userinfo(url)
+              rows.append((kind, display, url))
+      rows = []
+      local = os.path.join(os.environ.get("CI_PROJECT_DIR") or ".", "ci-notify-artifacts.tsv")
+      try:
+          if os.path.isfile(local) and os.path.getsize(local) > 0:
+              with open(local, "r", encoding="utf-8", errors="replace") as f:
+                  add_text(f.read(), rows)
+      except Exception:
+          pass
+      try:
+          jobs = json.loads(sys.stdin.read() or "[]")
+      except Exception:
+          jobs = []
+      if not isinstance(jobs, list):
+          jobs = []
+      token = os.environ.get("NOTIFY_GITLAB_TOKEN") or ""
+      api = (os.environ.get("CI_API_V4_URL") or "").rstrip("/")
+      pid = os.environ.get("CI_PROJECT_ID") or ""
+      self_id = str(os.environ.get("CI_JOB_ID") or "")
+      if token and api and pid:
+          for j in jobs:
+              if not isinstance(j, dict) or str(j.get("status") or "") != "success":
+                  continue
+              jid = str(j.get("id") or "")
+              if not jid or jid == self_id:
+                  continue
+              size = 0
+              for a in j.get("artifacts") or []:
+                  if isinstance(a, dict) and a.get("file_type") == "archive":
+                      try:
+                          size = int(a.get("size") or 0)
+                      except Exception:
+                          size = 0
+              af = j.get("artifacts_file") or {}
+              if isinstance(af, dict) and not size:
+                  try:
+                      size = int(af.get("size") or 0)
+                  except Exception:
+                      size = 0
+              if not size or size > 262144:
+                  continue
+              req = urllib.request.Request(
+                  "%s/projects/%s/jobs/%s/artifacts" % (api, pid, jid),
+                  headers={"PRIVATE-TOKEN": token},
+              )
+              try:
+                  data = urllib.request.urlopen(req, timeout=20).read()
+              except Exception:
+                  continue
+              try:
+                  z = zipfile.ZipFile(io.BytesIO(data))
+                  name = next((n for n in z.namelist() if n.endswith("ci-notify-artifacts.tsv")), None)
+                  if name:
+                      add_text(z.read(name).decode("utf-8", "replace"), rows)
+              except Exception:
+                  continue
+      uniq = []
+      seen = set()
+      for kind, display, url in rows:
+          if display in seen:
+              continue
+          seen.add(display)
+          uniq.append((kind, display, url))
+      if not uniq:
+          raise SystemExit(0)
+      def split_ref(ref):
+          name, ver = ref, ""
+          if ":" in ref and "/" in ref:
+              left, ver = ref.rsplit(":", 1)
+              name = left.split("/", 1)[-1]
+          return name, ver
+      items = []
+      more = []
+      _types = {"package": "包", "git": "Git", "ftp": "FTP", "oss": "OSS"}
+      for kind, display, url in uniq:
+          page = url if url.startswith("https://") else ""
+          if kind == "image":
+              name, ver = split_ref(display)
+              item = {"name": name, "type": "镜像", "status": "success"}
+              if ver:
+                  item["version"] = ver
+              if page:
+                  item["url"] = page
+          else:
+              item = {"name": display, "type": _types.get(kind, kind), "status": "success"}
+              if page:
+                  item["url"] = page
+          items.append(item)
+          # 访问页只放进详情载荷，不写进卡片正文。Harbor 网页、Git 页面这类地址对用户没有阅读价值。
+          if len(uniq) > 1:
+              more.append("【制品】" + display)
+      head = uniq[0][1]
+      if len(uniq) > 1:
+          head = "%s 等 %d 个" % (head, len(uniq))
+      with open(".notify-artifact-head", "w", encoding="utf-8") as f:
+          f.write(head)
+      if more:
+          with open(".notify-artifact-more", "w", encoding="utf-8") as f:
+              f.write("\n".join(more))
+      with open(".notify-artifacts.json", "w", encoding="utf-8") as f:
+          json.dump(items[:8], f, ensure_ascii=False, separators=(",", ":"))
+      print("[notify] 制品 %d 个" % len(uniq))
+      PY
+      printf '%s' "${JOBS_JSON:-[]}" | python3 "$_py" || true
+      rm -f "$_py"
+
+# 模板渲染 + 衍生正文
+#   _DEF_TITLE / _DEF_MSG → NOTIFY_TITLE / NOTIFY_MSG / NOTIFY_COMBO
+#   业务侧 NOTIFY_TITLE_TEMPLATE / NOTIFY_MSG_TEMPLATE 可整体覆盖。
+#   默认骨架在有制品时把【制品】插到【项目】之后；
+#   自定义 NOTIFY_MSG_TEMPLATE 或 _MSG_CUSTOM=1 不改写。
+.notify-msg-render:
+  script:
+    - |
+      _TITLE_TPL="${NOTIFY_TITLE_TEMPLATE:-$_DEF_TITLE}"
+      _MSG_TPL="${NOTIFY_MSG_TEMPLATE:-$_DEF_MSG}"
+      NOTIFY_TITLE=$(eval "printf '%b' \"$_TITLE_TPL\"")
+      NOTIFY_MSG=$(eval "printf '%b' \"$_MSG_TPL\"")
+      NOTIFY_COMBO=$(printf '%s\n\n%s' "$NOTIFY_TITLE" "$NOTIFY_MSG")
+      _ARTIFACT_HEAD=""
+      _ARTIFACT_MORE=""
+      [ -s .notify-artifact-head ] && _ARTIFACT_HEAD=$(cat .notify-artifact-head)
+      [ -s .notify-artifact-more ] && _ARTIFACT_MORE=$(cat .notify-artifact-more)
+      export _ARTIFACT_HEAD _ARTIFACT_MORE
+      if [ -z "${NOTIFY_MSG_TEMPLATE:-}" ] && [ "${_MSG_CUSTOM:-0}" != "1" ] && [ -n "$_ARTIFACT_HEAD" ]; then
+        # 子进程读不到未导出变量，且正文含换行，写入文件再改，避免只剩制品行
+        printf '%s' "$NOTIFY_MSG" > .notify-msg-in
+        if ! python3 <<'PY'
+      import os
+      head = os.environ.get("_ARTIFACT_HEAD", "")
+      more = os.environ.get("_ARTIFACT_MORE", "")
+      try:
+          msg = open(".notify-msg-in", encoding="utf-8").read()
+      except Exception:
+          msg = ""
+      if head:
+          lines = msg.splitlines()
+          out = []
+          placed = False
+          for line in lines:
+              out.append(line)
+              if (not placed) and line.startswith("【项目】"):
+                  out.append("【制品】" + head)
+                  placed = True
+          if not placed:
+              out.insert(0, "【制品】" + head)
+          extra = [line for line in more.splitlines() if line.strip()]
+          if extra:
+              idx = next((i for i, line in enumerate(out) if line.startswith("【状态】")), len(out))
+              out[idx:idx] = extra
+          msg2 = "\n".join(out)
+          open(".notify-msg-rewritten", "w", encoding="utf-8").write(msg2)
+      PY
+        then
+          echo "[notify] 制品正文插入失败，保持原正文"
+        fi
+        if [ -s .notify-msg-rewritten ]; then
+          NOTIFY_MSG=$(cat .notify-msg-rewritten)
+          NOTIFY_COMBO=$(printf '%s\n\n%s' "$NOTIFY_TITLE" "$NOTIFY_MSG")
+        fi
+        rm -f .notify-msg-in .notify-msg-rewritten
+      fi
+      echo "==== 通知消息 (scenario=${NOTIFY_SCENARIO:-pipeline}, status=$STATUS) ===="
+      echo "$NOTIFY_COMBO"
+      echo "=========================================================="
+
+# JSON 转义（python3 一次完成，避免引号和换行注入）
+#   产出渠道发送所需的 NOTIFY_*_JSON
+.notify-msg-labels:
+  script:
+    - |
+      _json_escape() { python3 -c "import sys, json; print(json.dumps(sys.stdin.buffer.read().decode('utf-8')))"; }
+      NOTIFY_TITLE_JSON=$(printf '%s' "$NOTIFY_TITLE" | _json_escape)
+      NOTIFY_MSG_JSON=$(printf '%s' "$NOTIFY_MSG" | _json_escape)
+      NOTIFY_COMBO_JSON=$(printf '%s' "$NOTIFY_COMBO" | _json_escape)
+      export NOTIFY_TITLE NOTIFY_MSG NOTIFY_COMBO
+      export NOTIFY_TITLE_JSON NOTIFY_MSG_JSON NOTIFY_COMBO_JSON

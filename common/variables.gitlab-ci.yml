@@ -1,0 +1,70 @@
+variables:
+  # ── STEP_* 能力私有默认（由具体能力在自身 variables 块覆盖）────
+  # [内部] 能力显示名（日志用）
+  STEP_NAME: ""
+  # [用户可配] 是否启用当前能力
+  STEP_ENABLE: "true"
+  # [内部] 变更文件过滤正则（各能力自行覆盖，如 pylint 用 '\.py$'）
+  STEP_FILE_GLOB: "."
+  # [内部] 产物路径（跳过时写空数组占位）
+  STEP_ARTIFACT: ""
+
+  # ── .svn-checkout ───────────────────────────────────────────
+  # [用户可配] SVN 仓库 URL
+  SVN_REPO_URL: ""
+  # [用户可配] 本地检出目录
+  SVN_LOCAL_DIR: ""
+  # [用户可配] SVN 用户名 / 密码（业务侧在自己仓库 CI/CD Variables masked 注入）
+  SVN_USERNAME: ""
+  SVN_PASSWORD: ""
+
+  # ── .http-download ──────────────────────────────────────────
+  # [用户可配] 下载 URL
+  HTTP_DOWNLOAD_URL: ""
+  # [用户可配] 本地目标路径
+  HTTP_DOWNLOAD_DEST: ""
+  # [用户可配] 请求头（形如 "Authorization: Bearer xxx"）
+  HTTP_DOWNLOAD_HEADER: ""
+
+  # ── .http-upload ────────────────────────────────────────────
+  # [用户可配] 上传 URL
+  HTTP_UPLOAD_URL: ""
+  # [用户可配] 本地文件路径
+  HTTP_UPLOAD_LOCAL_PATH: ""
+  # [用户可配] 上传方式：form（curl -F，默认）或 put（curl --upload-file）
+  HTTP_UPLOAD_METHOD: "form"
+  # [用户可配] form 模式下的字段名
+  HTTP_UPLOAD_FIELD: "file"
+  # [用户可配] form 模式下的额外字段（形如 "k1=v1&k2=v2"）
+  HTTP_UPLOAD_EXTRA_FIELDS: ""
+  # [用户可配] 请求头
+  HTTP_UPLOAD_HEADER: ""
+
+  # ── .http-request ───────────────────────────────────────────
+  # [用户可配] 请求 URL
+  HTTP_REQUEST_URL: ""
+  # [用户可配] 请求方法（GET/POST/PUT/DELETE）
+  HTTP_REQUEST_METHOD: "GET"
+  # [用户可配] 请求体（JSON 字符串）
+  HTTP_REQUEST_BODY: ""
+  # [用户可配] Content-Type
+  HTTP_REQUEST_CONTENT_TYPE: "application/json"
+  # [用户可配] 请求头
+  HTTP_REQUEST_HEADER: ""
+  # [用户可配] 期望响应码
+  HTTP_REQUEST_EXPECT_CODE: "200"
+
+  # ── .maven-settings-setup ───────────────────────────────────
+  # [用户可配] Maven 镜像 URL（默认阿里云公共仓库，国内加速；可覆盖为内网 Nexus）
+  MAVEN_MIRROR_URL: "https://maven.aliyun.com/repository/public"
+  # [用户可配] Maven 镜像 ID / mirrorOf
+  MAVEN_MIRROR_ID: "aliyun-public"
+  MAVEN_MIRROR_OF: "*"
+  # [用户可配] 多组私服凭据（形如 "id1=user1:pass1&id2=user2:pass2"）
+  MAVEN_SERVERS: ""
+
+  # ── .build-filter ────────────────────────────────────────────
+  # [用户可配] 触发关键字（逗号分隔）；commit message 含任一关键字则 NEED_BUILD=true
+  BUILD_FILTER_KEYWORDS: "build,smoke,release"
+  # [用户可配] 支持手动触发（CI_PIPELINE_SOURCE=web 时 NEED_BUILD=true）
+  BUILD_FILTER_MANUAL_TRIGGER: "true"

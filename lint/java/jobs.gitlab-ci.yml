@@ -1,0 +1,113 @@
+# 原子能力：Java 静态检查（Checkstyle）
+# 按官方 Maven 坐标 com.puppycrawl.tools:checkstyle 取运行包。
+# 项目有 checkstyle.xml 时用项目配置，否则用发行版内置配置（默认 /google_checks.xml）。
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/git/variables.gitlab-ci.yml'
+  - local: '/git/jobs.gitlab-ci.yml'
+  - local: '/lint/java/variables.gitlab-ci.yml'
+
+stages:
+  - lint
+
+# ── 原子能力：Checkstyle ───────────────────────────────────────────
+# 组装 = 取变更文件 + 禁用则跳过 + 过滤 .java + checkstyle 命令。
+.checkstyle:
+  extends: .base-job
+  image: $LINT_JAVA_IMAGE
+  stage: lint
+  needs:
+    - job: ci-config-guard
+      optional: true
+  allow_failure: true
+  variables:
+    STEP_NAME: "checkstyle"
+    STEP_ENABLE: "$LINT_JAVA_CHECKSTYLE_ENABLE"
+    STEP_FILE_GLOB: '\.java$'
+  cache:
+    key: "checkstyle-$LINT_JAVA_CHECKSTYLE_VERSION"
+    paths:
+      - .cache/checkstyle/
+  before_script:
+    - export LC_ALL="$CI_LOCALE"; export LANG="$CI_LOCALE"
+    - !reference [.get-changed-files, before_script]
+  script:
+    - !reference [.skip-if-disabled, script]
+    - !reference [.filter-changed-files, script]
+    - |
+      LIB=".cache/checkstyle/lib"
+      if ! ls "$LIB"/*.jar >/dev/null 2>&1; then
+        if ! command -v mvn >/dev/null 2>&1; then
+          if command -v apk >/dev/null 2>&1; then
+            sed -i "s#dl-cdn.alpinelinux.org#${PKG_ALPINE_MIRROR:-mirrors.aliyun.com}#g" /etc/apk/repositories 2>/dev/null || true
+            apk add --no-cache maven >/dev/null
+          elif command -v apt-get >/dev/null 2>&1; then
+            if [ "${USE_CHINA_MIRROR:-true}" = "true" ] && [ -f /etc/apt/sources.list ]; then
+              M="${PKG_APT_MIRROR:-mirrors.aliyun.com}"
+              sed -i "s|deb.debian.org|$M|g; s|security.debian.org|$M|g; s|archive.ubuntu.com|$M|g; s|security.ubuntu.com|$M|g" /etc/apt/sources.list 2>/dev/null || true
+            fi
+            apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq maven >/dev/null 2>&1
+          fi
+        fi
+        mkdir -p .cache/checkstyle
+        cat > .cache/checkstyle/pom.xml <<EOF
+      <project>
+        <modelVersion>4.0.0</modelVersion>
+        <groupId>ci</groupId>
+        <artifactId>checkstyle-cli</artifactId>
+        <version>1</version>
+        <dependencies>
+          <dependency>
+            <groupId>com.puppycrawl.tools</groupId>
+            <artifactId>checkstyle</artifactId>
+            <version>${LINT_JAVA_CHECKSTYLE_VERSION}</version>
+          </dependency>
+        </dependencies>
+      </project>
+      EOF
+        SETTINGS_ARG=""
+        if [ -n "${MAVEN_MIRROR_URL:-}" ]; then
+          mkdir -p "$HOME/.m2"
+          cat > "$HOME/.m2/ci-settings.xml" <<EOF
+      <settings>
+        <mirrors>
+          <mirror>
+            <id>${MAVEN_MIRROR_ID:-aliyun-public}</id>
+            <mirrorOf>${MAVEN_MIRROR_OF:-*}</mirrorOf>
+            <url>$MAVEN_MIRROR_URL</url>
+          </mirror>
+        </mirrors>
+      </settings>
+      EOF
+          SETTINGS_ARG="-s $HOME/.m2/ci-settings.xml"
+        fi
+        echo "下载 Checkstyle ${LINT_JAVA_CHECKSTYLE_VERSION}"
+        mvn -f .cache/checkstyle/pom.xml $SETTINGS_ARG \
+          org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy-dependencies \
+          -DoutputDirectory="$CI_PROJECT_DIR/.cache/checkstyle/lib"
+      fi
+      CONFIG="${LINT_JAVA_CHECKSTYLE_BUILTIN:-/google_checks.xml}"
+      if [ -n "$LINT_JAVA_CHECKSTYLE_CONFIG" ] && [ -f "$LINT_JAVA_CHECKSTYLE_CONFIG" ]; then
+        CONFIG="$LINT_JAVA_CHECKSTYLE_CONFIG"
+      fi
+      echo "待扫描文件：$STEP_MATCHED_FILES"
+      echo "Checkstyle 配置：$CONFIG"
+      RC=0
+      if [ "$LINT_JAVA_CHECKSTYLE_SONAR_REPORT" = "true" ]; then
+        REPORT="$LINT_JAVA_CHECKSTYLE_SONAR_REPORT_PATH"
+        echo "==> 生成 Checkstyle XML：$REPORT（供 .upload-sonar 消费）"
+        mkdir -p "$(dirname "$REPORT")"
+        java -cp "$LIB/*" com.puppycrawl.tools.checkstyle.Main -c "$CONFIG" -f xml -o "$REPORT" $STEP_MATCHED_FILES || RC=$?
+        [ -f "$REPORT" ] || printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?><checkstyle></checkstyle>' > "$REPORT"
+        exit $RC
+      fi
+      java -cp "$LIB/*" com.puppycrawl.tools.checkstyle.Main -c "$CONFIG" $STEP_MATCHED_FILES || RC=$?
+      exit $RC
+  artifacts:
+    when: always
+    paths:
+      - "$LINT_JAVA_CHECKSTYLE_SONAR_REPORT_PATH"
+    expire_in: "1 day"

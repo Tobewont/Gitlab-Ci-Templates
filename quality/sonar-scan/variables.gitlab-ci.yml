@@ -1,0 +1,20 @@
+variables:
+  # ── .sonar-scan 扫描参数 ─────────────────────────────────────
+  # [用户可配] 源码路径 / 排除 / 包含
+  QUALITY_SONAR_SOURCES: "."
+  QUALITY_SONAR_EXCLUSIONS: "**/node_modules/**,**/vendor/**,**/dist/**,**/build/**,**/coverage/**,**/*.min.js"
+  QUALITY_SONAR_INCLUSIONS: ""
+  # [用户可配] 额外报告路径（各语言测试/覆盖率/lint 报告）
+  QUALITY_SONAR_GO_TEST_REPORT: ""
+  QUALITY_SONAR_GO_COVERAGE_REPORT: ""
+  QUALITY_SONAR_EXTERNAL_ISSUES: ""
+  # [用户可配] 单个额外自定义参数（完整 -D... 形式；多个参数请在业务 job 中覆盖 script）
+  QUALITY_SONAR_EXTRA_ARGS: ""
+
+  # ── 快速模式（从外部 issues 报告提取扫描范围）────────────────────
+  # [用户可配] 置为 Sonar external issues 报告路径（如 sonar-external-issues.json）时启用：
+  #   动态从报告提取涉及文件作为 sonar.inclusions（只扫这些文件，覆盖 QUALITY_SONAR_INCLUSIONS）；
+  #   报告缺失或无 issue 时 exclusions=**/*：内置分析全跳过、仅导入外部 issues。
+  QUALITY_SONAR_INCLUSIONS_FROM_REPORT: ""
+  # [用户可配] 快速模式命中文件时额外排除的路径（默认与 QUALITY_SONAR_EXCLUSIONS 相同）
+  QUALITY_SONAR_REPORT_MODE_EXCLUSIONS: "**/node_modules/**,**/vendor/**,**/dist/**,**/build/**,**/coverage/**,**/*.min.js"

@@ -1,0 +1,6 @@
+variables:
+  # [用户可配] 读取 MR 变更的 GitLab API token。默认 GITLAB_TOKEN
+  GIT_CHANGED_FILES_TOKEN: "$GITLAB_TOKEN"
+  # ── .get-changed-folders ───────────────────────────────────
+  # [用户可配] 目录层级深度（1=顶层，2=前两级...）
+  GIT_CHANGED_FILES_FOLDER_DEPTH: "1"

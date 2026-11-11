@@ -1,0 +1,81 @@
+# 原子能力：Python 单元测试（pytest / 通用）
+# 支持：slim 镜像内按需装 git(拉 git+https 私有依赖) / apt 系统依赖 / buster archive 源、
+#       从 requirements 过滤指定包(如 mysqlclient)、junit 报告、pytest 无用例(exit 5)容错。
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/ut/python/variables.gitlab-ci.yml'
+
+stages:
+  - ut
+
+.pytest:
+  extends: .base-job
+  image: $UT_PYTHON_IMAGE
+  stage: ut
+  variables:
+    STEP_NAME: "Python Unit Test"
+    STEP_ENABLE: "$UT_PYTHON_ENABLE"
+  script:
+    - !reference [.skip-if-disabled, script]
+    - |
+      set -eu
+      export LC_ALL=C.UTF-8; export LANG=C.UTF-8
+
+      # ── 可选：debian buster 已 EOL，切 archive 源（装 apt 包前）──
+      if [ "$UT_PYTHON_DEBIAN_BUSTER_ARCHIVE" = "true" ]; then
+        printf 'deb http://archive.debian.org/debian buster main non-free contrib\ndeb http://archive.debian.org/debian-security buster/updates main\n' > /etc/apt/sources.list
+        echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check
+      fi
+
+      # ── 可选：安装 git（requirements 含 git+https 私有依赖时需要）──
+      APT_PKGS=""
+      [ "$UT_PYTHON_INSTALL_GIT" = "true" ] && APT_PKGS="git"
+      [ -n "$UT_PYTHON_APT_PACKAGES" ] && APT_PKGS="$APT_PKGS $UT_PYTHON_APT_PACKAGES"
+      if [ -n "$APT_PKGS" ]; then
+        if command -v apt-get >/dev/null 2>&1; then
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends $APT_PKGS
+        elif command -v apk >/dev/null 2>&1; then
+          apk add --no-cache $APT_PKGS
+        fi
+      fi
+
+      # ── 依赖文件：可选过滤指定包（如 mysqlclient），过滤后放回同目录以保 "-r xxx" 相对引用有效 ──
+      REQ="$UT_PYTHON_REQUIREMENTS"
+      if [ -n "$UT_PYTHON_EXCLUDE_PACKAGES" ] && [ -f "$REQ" ]; then
+        REQ_DIR=$(dirname "$REQ")
+        FILTERED="$REQ_DIR/.ci-ut-requirements.txt"
+        PATTERN=$(printf '%s' "$UT_PYTHON_EXCLUDE_PACKAGES" | tr ',' '|')
+        grep -v -i -E "$PATTERN" "$REQ" > "$FILTERED"
+        REQ="$FILTERED"
+      fi
+
+      # ── 安装依赖 ──
+      if [ -f "$REQ" ]; then
+        pip install --no-cache-dir -i "$UT_PYTHON_PIP_INDEX" -r "$REQ"
+      else
+        echo "[warn] 依赖文件不存在: $REQ，跳过 pip install"
+      fi
+
+      # ── 执行测试 ──
+      JUNIT_ARG=""
+      [ -n "$UT_PYTHON_JUNIT_REPORT" ] && JUNIT_ARG="--junitxml=$UT_PYTHON_JUNIT_REPORT"
+      set +e
+      $UT_PYTHON_TEST_CMD $UT_PYTHON_TEST_ARGS $JUNIT_ARG
+      RC=$?
+      set -e
+      # pytest exit 5 = 未收集到任何用例
+      if [ "$RC" = "5" ] && [ "$UT_PYTHON_ALLOW_NO_TESTS" = "true" ]; then
+        echo "[warn] 未收集到任何测试用例（exit 5），按配置视为通过"
+        exit 0
+      fi
+      exit $RC
+  artifacts:
+    when: always
+    paths:
+      - $UT_PYTHON_JUNIT_REPORT
+    reports:
+      junit: $UT_PYTHON_JUNIT_REPORT
+    expire_in: "7 days"

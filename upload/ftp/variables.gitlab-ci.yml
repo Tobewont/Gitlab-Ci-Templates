@@ -1,0 +1,20 @@
+variables:
+  # [用户可配] FTP 上传执行镜像
+  UPLOAD_FTP_IMAGE: "registry.example.com/cicd/cschlosser/drone-ftps:latest"
+  # [用户可配] 上传开关
+  UPLOAD_FTP_ENABLE: "true"
+  # [用户可配] FTP 服务器主机名
+  UPLOAD_FTP_HOSTNAME: ""
+  # [用户可配] FTP 凭据（业务侧在自己仓库 CI/CD Variables masked 注入）
+  UPLOAD_FTP_USERNAME: ""
+  UPLOAD_FTP_PASSWORD: ""
+  # [用户可配] 是否走 FTPS
+  UPLOAD_FTP_SECURE: "false"
+  # [用户可配] 是否校验证书（FTPS 时）
+  UPLOAD_FTP_VERIFY: "true"
+  # [用户可配] 上传前是否清空远端目录
+  UPLOAD_FTP_CLEAN_DIR: "false"
+  # [用户可配] 本地源目录（相对仓库根，drone-ftps 需要绝对路径，job 内部会自动拼接）
+  UPLOAD_FTP_SRC_DIR: ""
+  # [用户可配] 远端目标目录
+  UPLOAD_FTP_DEST_DIR: ""

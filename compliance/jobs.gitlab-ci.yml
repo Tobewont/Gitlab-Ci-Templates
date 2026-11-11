@@ -1,0 +1,111 @@
+# 功能模块：合规检测（语言无关）—— 正则 / LLM / 报告聚合
+#   .regex-check        正则规则检测
+#   .llm-check          LLM 语义检测
+#   .compliance-report  报告聚合与回写
+#
+# 职责边界：
+#   三个能力均为通用外壳，检测逻辑由使用方在 COMPLIANCE_SCRIPT_DIR 下提供
+#   脚本（check_regex.sh / check_llm.sh / post_report.sh），本模块只负责传参。
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/common/variables.gitlab-ci.yml'
+  - local: '/common/jobs.gitlab-ci.yml'
+  - local: '/git/variables.gitlab-ci.yml'
+  - local: '/git/jobs.gitlab-ci.yml'
+  - local: '/compliance/variables.gitlab-ci.yml'
+
+stages:
+  - compliance
+
+# ── 片段：业务脚本存在性校验 ──────────────────────────────────────────
+# 脚本缺失时打印可操作提示并以成功退出，不让 shell 抛 "No such file or directory"。
+.compliance-require-script:
+  script:
+    - |
+      _require_compliance_script() {
+        _script_path="$1"
+        if [ ! -f "$_script_path" ]; then
+          echo "[skip] 检测脚本不存在: $_script_path"
+          echo "       请在 COMPLIANCE_SCRIPT_DIR（当前: ${COMPLIANCE_SCRIPT_DIR}）下提供该脚本。"
+          [ -n "$STEP_ARTIFACT" ] && echo '[]' > "$STEP_ARTIFACT"
+          return 1
+        fi
+        return 0
+      }
+
+# ── 正则规则检测（语言无关）────────────────────────────────────────
+# 组装：变更文件（.get-changed-files） + 禁用则跳过（.skip-if-disabled）
+#       + check_regex.sh。文件过滤交由脚本按规则集处理。
+.regex-check:
+  extends: .base-job
+  stage: compliance
+  variables:
+    STEP_NAME: "正则规则检测"
+    STEP_ENABLE: "$COMPLIANCE_ENABLE_REGEX"
+    STEP_ARTIFACT: "compliance-regex.json"
+  before_script:
+    - apk add --no-cache git bash >/dev/null 2>&1 || true
+    - !reference [.get-changed-files, before_script]
+  script:
+    - !reference [.skip-if-disabled, script]
+    - !reference [.compliance-require-script, script]
+    - |
+      _require_compliance_script "${COMPLIANCE_SCRIPT_DIR}/check_regex.sh" || exit 0
+      RULES_ARG=""
+      [ -n "$COMPLIANCE_CUSTOM_RULES_FILE" ] && RULES_ARG="--rules $COMPLIANCE_CUSTOM_RULES_FILE"
+      bash "${COMPLIANCE_SCRIPT_DIR}/check_regex.sh" $RULES_ARG --output "$STEP_ARTIFACT" $CI_CHANGED_FILES
+  artifacts:
+    when: always
+    paths: [ "compliance-regex.json" ]
+
+# ── LLM 检测（语言无关，复用全局 LLM_*）──────────────────────────
+# 组装：变更文件 + 禁用则跳过 + LLM 参数校验 + check_llm.sh。
+.llm-check:
+  extends: .base-job
+  stage: compliance
+  variables:
+    STEP_NAME: "LLM 检测"
+    STEP_ENABLE: "$COMPLIANCE_ENABLE_LLM"
+    STEP_ARTIFACT: "compliance-llm.json"
+  before_script:
+    - apk add --no-cache git bash curl jq >/dev/null 2>&1 || true
+    - !reference [.get-changed-files, before_script]
+  script:
+    - !reference [.skip-if-disabled, script]
+    - !reference [.compliance-require-script, script]
+    - |
+      if [ -z "$COMPLIANCE_LLM_MODEL" ] || [ -z "$COMPLIANCE_LLM_API_URL" ] || [ -z "$COMPLIANCE_LLM_API_KEY" ]; then
+        echo "[skip] LLM 参数未配置（需要 COMPLIANCE_LLM_MODEL / COMPLIANCE_LLM_API_URL / COMPLIANCE_LLM_API_KEY）"
+        echo '[]' > "$STEP_ARTIFACT"; exit 0
+      fi
+      _require_compliance_script "${COMPLIANCE_SCRIPT_DIR}/check_llm.sh" || exit 0
+      bash "${COMPLIANCE_SCRIPT_DIR}/check_llm.sh" \
+        --spec "$COMPLIANCE_SPEC_FILE" \
+        --model "$COMPLIANCE_LLM_MODEL" --api-url "$COMPLIANCE_LLM_API_URL" --api-key "$COMPLIANCE_LLM_API_KEY" \
+        --output "$STEP_ARTIFACT" $CI_CHANGED_FILES
+  artifacts:
+    when: always
+    paths: [ "compliance-llm.json" ]
+
+# ── 报告聚合与回写（语言无关，token 为 COMPLIANCE_GITLAB_TOKEN）────────
+# 评论回写消费使用方脚本产出的报告。
+.compliance-report:
+  image: $CI_BASE_IMAGE
+  stage: compliance
+  before_script:
+    - apk add --no-cache bash jq >/dev/null 2>&1 || true
+  script:
+    - !reference [.compliance-require-script, script]
+    - |
+      _require_compliance_script "${COMPLIANCE_SCRIPT_DIR}/post_report.sh" || exit 0
+      if [ -z "$COMPLIANCE_GITLAB_TOKEN" ]; then
+        echo "[skip] COMPLIANCE_GITLAB_TOKEN 未配置，跳过报告回写"; exit 0
+      fi
+      bash "${COMPLIANCE_SCRIPT_DIR}/post_report.sh" \
+        --project-id "$CI_PROJECT_ID" \
+        --commit-sha "$CI_COMMIT_SHA" \
+        --token "$COMPLIANCE_GITLAB_TOKEN"
+  artifacts:
+    when: always
+    paths: [ "compliance-report.json" ]

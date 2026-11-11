@@ -1,0 +1,52 @@
+# 原子能力：阿里云 OSS 上传（ossutil）
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/upload/oss/variables.gitlab-ci.yml'
+
+stages:
+  - upload
+
+.oss-upload:
+  extends: .base-job
+  image: $UPLOAD_OSS_IMAGE
+  stage: upload
+  variables:
+    STEP_NAME: "OSS Upload"
+    STEP_ENABLE: "$UPLOAD_OSS_ENABLE"
+  script:
+    - |
+      set -eu
+      : > "${CI_PROJECT_DIR:-.}/ci-notify-artifacts.tsv" || true
+      case "$STEP_ENABLE" in
+        false) echo "[skip] $STEP_NAME 未启用（UPLOAD_OSS_ENABLE=$STEP_ENABLE）"; exit 0 ;;
+        true)  ;;
+        *)     echo "[error] UPLOAD_OSS_ENABLE 必须为 true/false，当前值: $STEP_ENABLE"; exit 1 ;;
+      esac
+      case "$UPLOAD_OSS_FORCE:$UPLOAD_OSS_RECURSIVE" in
+        true:true|true:false|false:true|false:false) ;;
+        *) echo "[error] UPLOAD_OSS_FORCE / UPLOAD_OSS_RECURSIVE 必须为 true/false"; exit 1 ;;
+      esac
+      if [ -z "$UPLOAD_OSS_ACCESS_KEY_ID" ] || [ -z "$UPLOAD_OSS_ACCESS_KEY_SECRET" ] || [ -z "$UPLOAD_OSS_ENDPOINT" ] || [ -z "$UPLOAD_OSS_BASE_URL" ] || [ -z "$UPLOAD_OSS_LOCAL_PATH" ]; then
+        echo "[error] 已启用 OSS Upload，但缺少必要变量: UPLOAD_OSS_ACCESS_KEY_ID / SECRET / ENDPOINT / BASE_URL / LOCAL_PATH"; exit 1
+      fi
+      if [ ! -e "$UPLOAD_OSS_LOCAL_PATH" ]; then
+        echo "[error] OSS 待上传路径不存在: $UPLOAD_OSS_LOCAL_PATH"; exit 1
+      fi
+      FLAGS=""
+      [ "$UPLOAD_OSS_FORCE" = "true" ]     && FLAGS="$FLAGS --force"
+      [ "$UPLOAD_OSS_RECURSIVE" = "true" ] && FLAGS="$FLAGS -r"
+      TARGET="${UPLOAD_OSS_BASE_URL}${UPLOAD_OSS_REMOTE_PATH:+/}${UPLOAD_OSS_REMOTE_PATH}"
+      echo "上传 $UPLOAD_OSS_LOCAL_PATH → $TARGET"
+      ossutil $FLAGS \
+        -e "$UPLOAD_OSS_ENDPOINT" \
+        -i "$UPLOAD_OSS_ACCESS_KEY_ID" \
+        -k "$UPLOAD_OSS_ACCESS_KEY_SECRET" \
+        cp "$UPLOAD_OSS_LOCAL_PATH" "$TARGET"
+      printf 'oss\t%s\t\n' "$TARGET" >> "${CI_PROJECT_DIR:-.}/ci-notify-artifacts.tsv" || true
+      echo "已上传 OSS: $TARGET"
+  artifacts:
+    paths:
+      - ci-notify-artifacts.tsv
+    expire_in: 1 day
+    when: on_success

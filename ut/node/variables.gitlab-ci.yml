@@ -1,0 +1,19 @@
+variables:
+  # [用户可配] Node 测试执行镜像（建议与业务侧 node 版本对齐）
+  UT_NODE_IMAGE: "registry.example.com/library/node:24.12.0"
+  # [用户可配] 单元测试开关
+  UT_NODE_ENABLE: "true"
+  # [用户可配] 包管理器：npm / yarn / pnpm
+  UT_NODE_PKG_MANAGER: "npm"
+  # [用户可配] npm/yarn 镜像源
+  UT_NODE_REGISTRY: "https://registry.npmmirror.com"
+  # [用户可配] 是否执行依赖安装
+  UT_NODE_INSTALL: "true"
+  # [用户可配] 依赖安装额外参数
+  UT_NODE_INSTALL_ARGS: ""
+  # [用户可配] 测试命令（npm test / yarn test / npx jest 等）
+  UT_NODE_TEST_CMD: "npm test"
+  # [用户可配] junit 报告输出路径（需测试框架自身配置生成对应文件）
+  UT_NODE_JUNIT_REPORT: "junit.xml"
+  # [用户可配] Node 内存上限（MB，大型 TS 项目按需调大）
+  UT_NODE_MAX_OLD_SPACE_MB: "3072"

@@ -1,0 +1,5 @@
+variables:
+  # [用户可配] 企微群机器人 Webhook URL（业务侧在自己仓库 CI/CD Variables masked 注入）
+  NOTIFY_WEWORK_WEBHOOK_URL: ""
+  # [用户可配] @人（手机号列表，逗号分隔）；@all 表示全体
+  NOTIFY_WEWORK_MENTIONED_MOBILES: ""

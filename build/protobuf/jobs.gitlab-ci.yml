@@ -1,0 +1,58 @@
+# 原子能力：Protobuf 代码生成（protoc）
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/build/protobuf/variables.gitlab-ci.yml'
+
+stages:
+  - build
+
+.protoc-gen:
+  extends: .base-job
+  image: $BUILD_PROTOC_IMAGE
+  stage: build
+  variables:
+    STEP_NAME: "Protobuf Generate"
+    STEP_ENABLE: "$BUILD_PROTOC_ENABLE"
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（BUILD_PROTOC_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      if [ ! -d "$BUILD_PROTOC_SRC_DIR" ]; then
+        echo "[skip] $BUILD_PROTOC_SRC_DIR 不存在"; exit 0
+      fi
+      mkdir -p "$BUILD_PROTOC_OUT_DIR"
+
+      INC_ARGS="-I $BUILD_PROTOC_SRC_DIR"
+      if [ -n "$BUILD_PROTOC_INCLUDE_DIRS" ]; then
+        OLDIFS="$IFS"; IFS=,
+        for d in $BUILD_PROTOC_INCLUDE_DIRS; do
+          d=$(echo "$d" | tr -d ' ')
+          [ -n "$d" ] && INC_ARGS="$INC_ARGS -I $d"
+        done
+        IFS="$OLDIFS"
+      fi
+
+      LANG_ARGS=""
+      OLDIFS="$IFS"; IFS=,
+      for lang in $BUILD_PROTOC_LANGUAGES; do
+        lang=$(echo "$lang" | tr -d ' ')
+        [ -z "$lang" ] && continue
+        LANG_ARGS="$LANG_ARGS --${lang}_out=$BUILD_PROTOC_OUT_DIR"
+      done
+      IFS="$OLDIFS"
+
+      PROTO_FILES=$(find "$BUILD_PROTOC_SRC_DIR" -name '*.proto')
+      if [ -z "$PROTO_FILES" ]; then
+        echo "[skip] $BUILD_PROTOC_SRC_DIR 下无 .proto 文件"; exit 0
+      fi
+      echo "==> protoc $INC_ARGS $LANG_ARGS $BUILD_PROTOC_EXTRA_ARGS $PROTO_FILES"
+      protoc $INC_ARGS $LANG_ARGS $BUILD_PROTOC_EXTRA_ARGS $PROTO_FILES
+      echo "生成产物："
+      find "$BUILD_PROTOC_OUT_DIR" -type f | head -50
+  artifacts:
+    when: always
+    paths:
+      - $BUILD_PROTOC_OUT_DIR/
+    expire_in: "7 days"

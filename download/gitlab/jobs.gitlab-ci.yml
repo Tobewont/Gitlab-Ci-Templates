@@ -1,0 +1,55 @@
+# 原子能力：从 GitLab Git 制品仓下载文件或目录
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/download/gitlab/variables.gitlab-ci.yml'
+
+stages: [download]
+
+.gitlab-download:
+  extends: .base-job
+  image: $DOWNLOAD_GITLAB_IMAGE
+  stage: download
+  variables:
+    STEP_ENABLE: "$DOWNLOAD_GITLAB_ENABLE"
+  script:
+    - |
+      set -eu
+      printf '{}\n' > "$DOWNLOAD_GITLAB_MANIFEST_FILE"; : > "$DOWNLOAD_GITLAB_DOTENV_FILE"
+      case "$STEP_ENABLE" in false) echo "[skip] GitLab download 未启用（DOWNLOAD_GITLAB_ENABLE=$STEP_ENABLE）"; exit 0 ;; true) ;; *) echo "[error] DOWNLOAD_GITLAB_ENABLE 必须为 true/false"; exit 1 ;; esac
+      for cmd in git jq sha256sum find cp mkdir mktemp rm chmod wc tr sed sort grep dirname awk mv cat; do command -v "$cmd" >/dev/null 2>&1 || { echo "[error] 镜像缺少命令: $cmd"; exit 1; }; done
+      for name in DOWNLOAD_GITLAB_REPO_URL DOWNLOAD_GITLAB_BRANCH DOWNLOAD_GITLAB_USERNAME DOWNLOAD_GITLAB_TOKEN DOWNLOAD_GITLAB_PATHS DOWNLOAD_GITLAB_DEST_DIR; do eval "value=\${$name:-}"; [ -n "$value" ] || { echo "[error] $name 未配置"; exit 1; }; done
+      case "$DOWNLOAD_GITLAB_TYPE" in file|directory) ;; *) echo "[error] DOWNLOAD_GITLAB_TYPE 必须为 file/directory"; exit 1 ;; esac
+      case "$DOWNLOAD_GITLAB_REPO_URL" in https://*@*) echo "[error] REPO_URL 禁止内嵌凭据"; exit 1 ;; https://*) ;; *) echo "[error] REPO_URL 必须为 HTTPS"; exit 1 ;; esac
+      safe_path() { case "$1" in ''|*[!A-Za-z0-9._/-]*|/*|*//*|.|..|./*|../*|*/./*|*/../*|*/.|*/..) return 1 ;; *) return 0 ;; esac; }
+      safe_path "$DOWNLOAD_GITLAB_DEST_DIR" || { echo "[error] DEST_DIR 必须是安全相对路径"; exit 1; }
+      case "/$DOWNLOAD_GITLAB_MANIFEST_FILE" in "/$DOWNLOAD_GITLAB_DEST_DIR"/*) echo "[error] MANIFEST_FILE 不能位于 DEST_DIR 内"; exit 1 ;; esac
+      case "/$DOWNLOAD_GITLAB_DOTENV_FILE" in "/$DOWNLOAD_GITLAB_DEST_DIR"/*) echo "[error] DOTENV_FILE 不能位于 DEST_DIR 内"; exit 1 ;; esac
+      for name in DOWNLOAD_GITLAB_MAX_FILES DOWNLOAD_GITLAB_MAX_FILE_BYTES DOWNLOAD_GITLAB_MAX_TOTAL_BYTES; do eval "value=\${$name}"; case "$value" in *[!0-9]*|'') echo "[error] $name 必须是正整数"; exit 1 ;; esac; [ "$value" -gt 0 ] || exit 1; done
+      [ ! -e "$DOWNLOAD_GITLAB_DEST_DIR" ] || { echo "[error] 输出目录已存在: $DOWNLOAD_GITLAB_DEST_DIR"; exit 1; }
+      work=$(mktemp -d); askpass="$work/askpass.sh"; cleanup() { rm -rf "$work"; }; trap cleanup EXIT HUP INT TERM
+      printf '#!/bin/sh\ncase "$1" in *Username*) printf "%%s\\n" "$DOWNLOAD_GITLAB_USERNAME";; *Password*) printf "%%s\\n" "$DOWNLOAD_GITLAB_TOKEN";; *) exit 1;; esac\n' > "$askpass"; chmod 700 "$askpass"
+      GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch "$DOWNLOAD_GITLAB_BRANCH" --single-branch "$DOWNLOAD_GITLAB_REPO_URL" "$work/repo"
+      if find "$work/repo" -path "$work/repo/.git" -prune -o -type l -print | grep -q .; then echo "[error] 仓库包含符号链接，禁止下载以防路径穿越"; exit 1; fi
+      mkdir -p "$DOWNLOAD_GITLAB_DEST_DIR"
+      if [ "$DOWNLOAD_GITLAB_TYPE" = file ]; then
+        printf '%s' "$DOWNLOAD_GITLAB_PATHS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d' | sort -u > "$work/paths"
+        [ -s "$work/paths" ] || { echo "[error] 文件列表为空"; exit 1; }
+        while IFS= read -r path; do safe_path "$path" || { echo "[error] 非法路径: $path"; exit 1; }; [ -f "$work/repo/$path" ] || { echo "[error] 文件不存在: $path"; exit 1; }; mkdir -p "$DOWNLOAD_GITLAB_DEST_DIR/$(dirname "$path")"; cp "$work/repo/$path" "$DOWNLOAD_GITLAB_DEST_DIR/$path"; done < "$work/paths"
+      else
+        safe_path "$DOWNLOAD_GITLAB_PATHS" || { echo "[error] 非法目录: $DOWNLOAD_GITLAB_PATHS"; exit 1; }; [ -d "$work/repo/$DOWNLOAD_GITLAB_PATHS" ] || { echo "[error] 目录不存在"; exit 1; }; cp -R "$work/repo/$DOWNLOAD_GITLAB_PATHS/." "$DOWNLOAD_GITLAB_DEST_DIR/"; rm -rf "$DOWNLOAD_GITLAB_DEST_DIR/.git"
+      fi
+      find "$DOWNLOAD_GITLAB_DEST_DIR" -type l | grep -q . && { echo "[error] 输出包含符号链接"; exit 1; } || true
+      find "$DOWNLOAD_GITLAB_DEST_DIR" -type f -print | sort > "$work/files"; count=$(wc -l < "$work/files" | tr -d ' '); [ "$count" -gt 0 ] && [ "$count" -le "$DOWNLOAD_GITLAB_MAX_FILES" ] || { echo "[error] 文件数量不符合限制: $count"; exit 1; }
+      printf '[]' > "$work/items"; total=0
+      kept=0
+      while IFS= read -r file; do size=$(wc -c < "$file" | tr -d ' '); [ "$size" -eq 0 ] && { echo "[skip] 空文件（仓库占位，如 .gitkeep）: $file"; continue; }; [ "$size" -le "$DOWNLOAD_GITLAB_MAX_FILE_BYTES" ] || { echo "[error] 文件超过单文件上限: $file"; exit 1; }; total=$((total+size)); [ "$total" -le "$DOWNLOAD_GITLAB_MAX_TOTAL_BYTES" ] || { echo "[error] 总大小超限"; exit 1; }; rel=${file#"$DOWNLOAD_GITLAB_DEST_DIR/"}; sha=$(sha256sum "$file" | awk '{print $1}'); jq --arg path "$rel" --arg sha "$sha" --arg size "$size" '. + [{path:$path,size:($size|tonumber),sha256:$sha}]' "$work/items" > "$work/next"; mv "$work/next" "$work/items"; kept=$((kept+1)); done < "$work/files"
+      # 空文件不入清单，故对下游口径取实际入清单条数，与 manifest.files 一致
+      [ "$kept" -gt 0 ] || { echo "[error] 全部文件均为空，无有效内容"; exit 1; }
+      count=$kept
+      jq --arg source gitlab --arg type "$DOWNLOAD_GITLAB_TYPE" --arg output "$DOWNLOAD_GITLAB_DEST_DIR" '{source:$source,type:$type,output_dir:$output,files:.}' "$work/items" > "$DOWNLOAD_GITLAB_MANIFEST_FILE"
+      printf 'DOWNLOAD_OUTPUT_DIR=%s\nDOWNLOAD_FILE_COUNT=%s\nDOWNLOAD_MANIFEST_FILE=%s\n' "$DOWNLOAD_GITLAB_DEST_DIR" "$count" "$DOWNLOAD_GITLAB_MANIFEST_FILE" > "$DOWNLOAD_GITLAB_DOTENV_FILE"
+  artifacts:
+    expire_in: "1 day"
+    paths: [$DOWNLOAD_GITLAB_DEST_DIR, $DOWNLOAD_GITLAB_MANIFEST_FILE]
+    reports: {dotenv: $DOWNLOAD_GITLAB_DOTENV_FILE}

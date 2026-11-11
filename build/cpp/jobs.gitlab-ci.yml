@@ -1,0 +1,96 @@
+# 原子能力：C++ CMake 构建
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/build/cpp/variables.gitlab-ci.yml'
+
+stages:
+  - build
+
+.cmake-build:
+  extends: .base-job
+  image: $BUILD_CPP_IMAGE
+  stage: build
+  variables:
+    STEP_NAME: "CMake Build"
+    STEP_ENABLE: "$BUILD_CPP_CMAKE_ENABLE"
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（BUILD_CPP_CMAKE_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      if [ ! -f "$BUILD_CPP_SOURCE_DIR/CMakeLists.txt" ]; then
+        echo "[skip] $BUILD_CPP_SOURCE_DIR/CMakeLists.txt 不存在"; exit 0
+      fi
+      command -v cmake >/dev/null 2>&1 || (command -v apt-get >/dev/null 2>&1 && apt-get update -qq && apt-get install -y -qq cmake make) || (command -v apk >/dev/null 2>&1 && apk add --no-cache cmake make g++)
+
+      mkdir -p "$BUILD_CPP_BUILD_DIR"
+      PARALLEL="${BUILD_CPP_PARALLEL:-$(nproc 2>/dev/null || echo 2)}"
+      CCACHE_ARG=""
+      if [ "$BUILD_CPP_CCACHE_ENABLE" = "true" ] && command -v ccache >/dev/null 2>&1; then
+        export CCACHE_DIR="$CI_PROJECT_DIR/.ccache"; mkdir -p "$CCACHE_DIR"
+        CCACHE_ARG="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
+        echo "==> ccache 已启用 (CCACHE_DIR=$CCACHE_DIR)"; ccache -z >/dev/null 2>&1 || true
+      fi
+      CE_ARG=""
+      [ "$BUILD_CPP_EXPORT_COMPILE_COMMANDS" = "true" ] && CE_ARG="-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+      INSTALL_PREFIX_ARG=""
+      [ -n "$BUILD_CPP_INSTALL_DIR" ] && INSTALL_PREFIX_ARG="-DCMAKE_INSTALL_PREFIX=$BUILD_CPP_INSTALL_DIR"
+
+      echo "==> cmake configure"
+      cmake -S "$BUILD_CPP_SOURCE_DIR" -B "$BUILD_CPP_BUILD_DIR" \
+        -G "$BUILD_CPP_GENERATOR" \
+        -DCMAKE_BUILD_TYPE="$BUILD_CPP_BUILD_TYPE" \
+        $CE_ARG $INSTALL_PREFIX_ARG $CCACHE_ARG $BUILD_CPP_CMAKE_ARGS
+
+      echo "==> cmake build (parallel=$PARALLEL)"
+      cmake --build "$BUILD_CPP_BUILD_DIR" -j "$PARALLEL" $BUILD_CPP_BUILD_ARGS
+
+      if [ -n "$BUILD_CPP_INSTALL_DIR" ]; then
+        echo "==> cmake install → $BUILD_CPP_INSTALL_DIR"
+        cmake --install "$BUILD_CPP_BUILD_DIR"
+      fi
+      [ "$BUILD_CPP_CCACHE_ENABLE" = "true" ] && command -v ccache >/dev/null 2>&1 && ccache -s 2>/dev/null || true
+  cache:
+    key: "$CI_PROJECT_ID-cpp-ccache"
+    paths:
+      - .ccache/
+  artifacts:
+    when: always
+    paths:
+      - $BUILD_CPP_ARTIFACT_PATH
+    expire_in: "7 days"
+
+# 原子能力：脚本/Make 构建（非 CMake 工程，执行仓库内 make / autobuild.sh 等构建脚本）
+# 默认跑 make，可用 BUILD_CPP_MAKE_SCRIPT 覆盖为任意构建命令
+.make-build:
+  extends: .base-job
+  image: $BUILD_CPP_IMAGE
+  stage: build
+  variables:
+    STEP_NAME: "Make Build"
+    STEP_ENABLE: "$BUILD_CPP_MAKE_ENABLE"
+  script:
+    - |
+      if [ "$STEP_ENABLE" != "true" ]; then
+        echo "[skip] $STEP_NAME 未启用（BUILD_CPP_MAKE_ENABLE=$STEP_ENABLE）"; exit 0
+      fi
+      if [ "$BUILD_CPP_CCACHE_ENABLE" = "true" ] && command -v ccache >/dev/null 2>&1; then
+        export CCACHE_DIR="$CI_PROJECT_DIR/.ccache"; mkdir -p "$CCACHE_DIR"
+        export CC="ccache ${CC:-gcc}" CXX="ccache ${CXX:-g++}"
+        echo "==> ccache 已启用 (CCACHE_DIR=$CCACHE_DIR, CC=$CC CXX=$CXX)"; ccache -z >/dev/null 2>&1 || true
+      fi
+      cd "$BUILD_CPP_MAKE_WORKDIR"
+      echo "==> workdir: $(pwd)"
+      echo "==> build script: $BUILD_CPP_MAKE_SCRIPT"
+      sh -c "$BUILD_CPP_MAKE_SCRIPT"
+      [ "$BUILD_CPP_CCACHE_ENABLE" = "true" ] && command -v ccache >/dev/null 2>&1 && ccache -s 2>/dev/null || true
+  cache:
+    key: "$CI_PROJECT_ID-cpp-ccache"
+    paths:
+      - .ccache/
+  artifacts:
+    when: always
+    paths:
+      - $BUILD_CPP_MAKE_ARTIFACT_PATH
+    expire_in: "7 days"

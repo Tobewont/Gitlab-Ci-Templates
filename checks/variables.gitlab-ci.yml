@@ -1,0 +1,44 @@
+variables:
+  # [用户可配] 各检查开关
+  CHECKS_FILE_EXCLUSION_ENABLE: "false"
+  CHECKS_SENSITIVE_WORD_ENABLE: "false"
+  CHECKS_DB_TRANS_ENABLE: "false"
+  CHECKS_DOC_DETECT_ENABLE: "false"
+  CHECKS_CI_CONFIG_GUARD_ENABLE: "true"
+
+  # [用户可配] CI 配置保护：MR 合入禁止改动的文件（空格分隔）
+  CHECKS_CI_CONFIG_GUARD_PATHS: ".gitlab-ci.yml"
+
+  # [用户可配] 通用执行镜像（各能力可用自己的镜像覆盖）
+  CHECKS_IMAGE: "$CI_BASE_IMAGE"
+
+  # [用户可配] 文件排除检查：命令 + 规则 + 级别
+  CHECKS_FILE_EXCLUSION_IMAGE: "$CHECKS_IMAGE"
+  CHECKS_FILE_EXCLUSION_CMD: ""       # 业务侧完整命令，如 'node /dist/bundle.js'
+  CHECKS_FILE_EXCLUSION_RULES: ""     # 规则文件路径
+  CHECKS_FILE_EXCLUSION_LEVEL: "0"    # 严重级别
+
+  # [用户可配] 敏感词检查：使用方完整命令
+  CHECKS_SENSITIVE_WORD_IMAGE: "$CHECKS_IMAGE"
+  CHECKS_SENSITIVE_WORD_CMD: ""
+
+  # [用户可配] DB 事务检查：使用方完整命令
+  CHECKS_DB_TRANS_IMAGE: "$CHECKS_IMAGE"
+  CHECKS_DB_TRANS_CMD: ""
+
+  # [用户可配] 文档检测：命令
+  CHECKS_DOC_DETECT_IMAGE: "$CHECKS_IMAGE"
+  CHECKS_DOC_DETECT_CMD: ""           # 业务侧完整命令
+
+  # ── .toolchain-preflight（执行镜像工具链自检）──
+  # [用户可配] 开关 / 镜像 / 命令清单 / 是否要求 curl 支持 --fail-with-body
+  CHECKS_TOOLCHAIN_ENABLE: "true"
+  CHECKS_TOOLCHAIN_IMAGE: "$CHECKS_IMAGE"
+  CHECKS_TOOLCHAIN_COMMANDS: "sh git grep cut sed tr test mkdir rm cp chmod find mktemp tar curl jq awk wc basename head sort"
+  CHECKS_TOOLCHAIN_REQUIRE_CURL_FAIL_WITH_BODY: "true"
+
+  # ── .git-auth-preflight（git 仓库凭据可达性自检）──
+  # [用户可配] 开关 / 镜像 / 待校验仓库清单（每行 <repo_url>|<username>|<token>[|<ref>]）
+  CHECKS_GIT_AUTH_ENABLE: "true"
+  CHECKS_GIT_AUTH_IMAGE: "$CHECKS_IMAGE"
+  CHECKS_GIT_AUTH_REPOS: ""

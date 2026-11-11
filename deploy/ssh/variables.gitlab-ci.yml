@@ -1,0 +1,25 @@
+variables:
+  # [用户可配] 执行镜像（内置 sshpass + ssh 客户端）
+  DEPLOY_SSH_IMAGE: "$CI_BASE_IMAGE"
+  # [用户可配] 部署开关
+  DEPLOY_SSH_ENABLE: "true"
+  # [用户可配] 认证方式：key（SSH 私钥，默认，推荐）/ password（sshpass 密码）
+  DEPLOY_SSH_AUTH_MODE: "key"
+  # [用户可配] 目标主机（支持多个，逗号分隔；如 "192.168.1.10,192.168.1.11"）
+  DEPLOY_SSH_HOSTS: ""
+  # [用户可配] 目标端口
+  DEPLOY_SSH_PORT: "22"
+  # [用户可配] 登录用户
+  DEPLOY_SSH_USERNAME: ""
+  # [用户可配] SSH 私钥内容（AUTH_MODE=key 时必填；业务侧在自己仓库 CI/CD Variables 注入，变量类型建议 File）
+  DEPLOY_SSH_PRIVATE_KEY: ""
+  # [用户可配] SSH 登录密码（AUTH_MODE=password 时必填；业务侧在自己仓库 CI/CD Variables masked 注入，禁止明文写在 .gitlab-ci.yml）
+  DEPLOY_SSH_PASSWORD: ""
+  # [用户可配] 目标主机的 known_hosts（可选，留空则跳过严格校验）
+  DEPLOY_SSH_KNOWN_HOSTS: ""
+  # [用户可配] 要执行的远程命令
+  DEPLOY_SSH_COMMAND: ""
+  # [用户可配] 要上传的本地路径（先 scp 上传，再执行远程命令；留空则只执行远程命令）
+  DEPLOY_SSH_UPLOAD_LOCAL: ""
+  # [用户可配] 上传到远程主机的目标路径
+  DEPLOY_SSH_UPLOAD_REMOTE: ""

@@ -1,0 +1,58 @@
+# 原子能力：上传制品到 GitLab Generic Package Registry
+# https://docs.gitlab.com/ee/user/packages/generic_packages/
+# 默认走当前项目 + CI_JOB_TOKEN（无需额外配置 Secret）
+include:
+  - local: '/base/variables.gitlab-ci.yml'
+  - local: '/base/jobs.gitlab-ci.yml'
+  - local: '/upload/package/variables.gitlab-ci.yml'
+
+stages:
+  - upload
+
+.package-upload:
+  extends: .base-job
+  image: $UPLOAD_PACKAGE_IMAGE
+  stage: upload
+  variables:
+    STEP_NAME: "GitLab Package Upload"
+    STEP_ENABLE: "$UPLOAD_PACKAGE_ENABLE"
+  script:
+    - |
+      set -eu
+      : > "${CI_PROJECT_DIR:-.}/ci-notify-artifacts.tsv" || true
+      case "$STEP_ENABLE" in
+        false) echo "[skip] $STEP_NAME 未启用（UPLOAD_PACKAGE_ENABLE=$STEP_ENABLE）"; exit 0 ;;
+        true)  ;;
+        *)     echo "[error] UPLOAD_PACKAGE_ENABLE 必须为 true/false，当前值: $STEP_ENABLE"; exit 1 ;;
+      esac
+      if [ -z "$UPLOAD_PACKAGE_LOCAL_PATH" ] || [ ! -f "$UPLOAD_PACKAGE_LOCAL_PATH" ]; then
+        echo "[error] 已启用 GitLab Package Upload，但 LOCAL_PATH 未配置或文件不存在: $UPLOAD_PACKAGE_LOCAL_PATH"; exit 1
+      fi
+      for value in "$UPLOAD_PACKAGE_NAME" "$UPLOAD_PACKAGE_VERSION"; do
+        case "$value" in
+          ''|*[!A-Za-z0-9._-]*) echo "[error] Package name/version 仅允许字母、数字、点、下划线、连字符: $value"; exit 1 ;;
+        esac
+      done
+      command -v curl >/dev/null 2>&1 || (command -v apk >/dev/null 2>&1 && apk add --no-cache curl >/dev/null 2>&1) || (command -v apt-get >/dev/null 2>&1 && apt-get install -y -qq curl >/dev/null 2>&1)
+      FILE_NAME="${UPLOAD_PACKAGE_FILE_NAME:-$(basename "$UPLOAD_PACKAGE_LOCAL_PATH")}"
+      case "$FILE_NAME" in
+        ''|*[!A-Za-z0-9._-]*) echo "[error] Package 文件名仅允许字母、数字、点、下划线、连字符: $FILE_NAME"; exit 1 ;;
+      esac
+      URL="${UPLOAD_PACKAGE_API_URL}/projects/${UPLOAD_PACKAGE_PROJECT_ID}/packages/generic/${UPLOAD_PACKAGE_NAME}/${UPLOAD_PACKAGE_VERSION}/${FILE_NAME}?status=${UPLOAD_PACKAGE_STATUS}"
+      echo "==> 上传 $UPLOAD_PACKAGE_LOCAL_PATH → $URL"
+      curl -fsSL --retry 3 --max-time 600 \
+        -H "${UPLOAD_PACKAGE_TOKEN_HEADER}: ${UPLOAD_PACKAGE_TOKEN}" \
+        --upload-file "$UPLOAD_PACKAGE_LOCAL_PATH" \
+        "$URL"
+      echo ""
+      echo "已上传：$UPLOAD_PACKAGE_NAME/$UPLOAD_PACKAGE_VERSION/$FILE_NAME"
+      _page=""
+      if [ "${UPLOAD_PACKAGE_PROJECT_ID}" = "${CI_PROJECT_ID}" ] && [ -n "${CI_PROJECT_URL:-}" ]; then
+        _page="${CI_PROJECT_URL}/-/packages"
+      fi
+      printf 'package\t%s\t%s\n' "${UPLOAD_PACKAGE_NAME}/${UPLOAD_PACKAGE_VERSION}/${FILE_NAME}" "$_page" >> "${CI_PROJECT_DIR:-.}/ci-notify-artifacts.tsv" || true
+  artifacts:
+    paths:
+      - ci-notify-artifacts.tsv
+    expire_in: 1 day
+    when: on_success

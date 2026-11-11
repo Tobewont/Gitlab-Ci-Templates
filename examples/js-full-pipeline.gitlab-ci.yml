@@ -1,0 +1,88 @@
+workflow:
+  # CI 配置防合并覆盖前提：MR 事件必须产生 MR 流水线（guard 仅存在于 MR 流水线）；
+  #   分支有打开 MR 时去重分支流水线（保护卡在 MR 流水线，绕过分支流水线也无法合入）
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+# 完整 JS/TS 前端流水线：ESLint → 静态扫描 → AI 评审 → Node 构建 → OSS 上传 → 通知
+include:
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'lint/js/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'quality/sonar/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'review/ai/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'build/nodejs/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'upload/oss/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'notify/jobs.gitlab-ci.yml'
+  - project: 'group/gitlab-ci-templates'
+    ref: stable
+    file: 'checks/jobs.gitlab-ci.yml'
+
+stages:
+  - lint
+  - review
+  - quality
+  - build
+  - upload
+  - notify
+
+variables:
+  # ── Node.js 构建能力变量
+  BUILD_NODE_PACKAGE_MANAGER: "yarn"
+  BUILD_NODE_BUILD_CMD: "yarn run build:prod"
+  BUILD_NODE_MAX_OLD_SPACE_SIZE: "8192"
+
+  # ── OSS 上传能力变量
+  # UPLOAD_OSS_ACCESS_KEY_ID/SECRET 通过 CI/CD Variables 注入
+  UPLOAD_OSS_ENDPOINT: "oss-cn-hangzhou.aliyuncs.com"
+  UPLOAD_OSS_BASE_URL: "oss://my-bucket/frontend/${CI_PROJECT_NAME}"
+  UPLOAD_OSS_LOCAL_PATH: "dist"
+  UPLOAD_OSS_RECURSIVE: "true"
+  UPLOAD_OSS_FORCE: "true"
+
+my-eslint:
+  extends: .eslint
+  needs: []            # 源码级，起点并行
+
+my-ai-review:
+  extends: .ai-review
+  needs: []            # 与 eslint/sonar 并行
+
+my-sonar:
+  extends: .sonar-scan
+  needs: []            # 前端 sonar 扫源码，与 eslint/ai-review 并行
+
+my-node-build:
+  extends: .node-build
+  needs:
+    - my-eslint        # 等 lint 通过再构建
+
+my-oss-upload:
+  extends: .oss-upload
+  needs:
+    - my-node-build
+
+my-notify:
+  extends: .notify
+  needs:
+    - job: my-oss-upload
+      optional: true
+
+# CI 配置防合并覆盖：MR 源分支改动 .gitlab-ci.yml 则 guard 失败、卡死合并（.pre 阶段，先于所有 job；guard 失败则后续 job 全部不启动）
+#   默认启用（CHECKS_CI_CONFIG_GUARD_ENABLE: "true"）；显式设为 "false" 则 guard job 不创建、不作其它 job 前提（needs optional 自动豁免，零等待）
+#   guard 仅在 MR 流水线存在（模板 rules 限定），故上方 workflow rules 必须放行 merge_request_event
+ci-config-guard:
+  extends: .ci-config-guard

@@ -1,0 +1,19 @@
+variables:
+  # [用户可配] PHP 测试执行镜像（建议与业务侧 PHP 版本对齐）
+  UT_PHP_IMAGE: "registry.example.com/docker/library/php:8.1-cli"
+  # [用户可配] 单元测试开关
+  UT_PHP_ENABLE: "true"
+  # [用户可配] 是否执行 composer install（项目有 composer.json 时）
+  UT_PHP_COMPOSER_INSTALL: "true"
+  # [用户可配] composer 镜像源
+  UT_PHP_COMPOSER_MIRROR: "https://mirrors.aliyun.com/composer/"
+  # [用户可配] composer install 额外参数
+  UT_PHP_COMPOSER_ARGS: "--no-interaction --prefer-dist --no-progress"
+  # [用户可配] 测试命令（phpunit / vendor/bin/phpunit / php artisan test 等）
+  UT_PHP_TEST_CMD: "vendor/bin/phpunit"
+  # [用户可配] 测试命令额外参数
+  UT_PHP_TEST_ARGS: ""
+  # [用户可配] junit 报告输出路径（留空则不产出）
+  UT_PHP_JUNIT_REPORT: "report.xml"
+  # [用户可配] 未发现测试用例时是否视为通过（项目暂无单测时用 true）
+  UT_PHP_ALLOW_NO_TESTS: "true"

@@ -1,0 +1,7 @@
+# Git 层变量聚合入口
+include:
+  - local: '/git/changed-files/variables.gitlab-ci.yml'
+  - local: '/git/mr/variables.gitlab-ci.yml'
+  - local: '/git/comment/variables.gitlab-ci.yml'
+  - local: '/git/auth/variables.gitlab-ci.yml'
+  - local: '/git/version/variables.gitlab-ci.yml'

@@ -1,0 +1,9 @@
+variables:
+  # [用户可配] Trivy 镜像漏洞扫描开关
+  SEC_TRIVY_ENABLE: "true"
+  # [用户可配] Trivy 执行镜像
+  SEC_TRIVY_IMAGE: "registry.example.com/cicd/aquasec/trivy:0.28.0"
+  SEC_TRIVY_TARGET: ""                # 必填：待扫描镜像全 URL（如 harbor/x/y:tag）
+  SEC_TRIVY_SEVERITY: "HIGH,CRITICAL" # 报告的最低严重级别
+  SEC_TRIVY_TIMEOUT: "15m"
+  SEC_TRIVY_EXIT_CODE: "0"            # 发现漏洞时的退出码（0=只报告不阻断，1=阻断）
